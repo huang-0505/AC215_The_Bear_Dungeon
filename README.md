@@ -6,10 +6,10 @@
 
 
 **Group Name**
-
+The Bear Dungeon (TBD)
 
 **Project**
-In this project, we aim to develop an AI-powered cheese application. The app will feature visual recognition technology to identify various types of cheese and include a chatbot for answering all kinds of cheese-related questions. Users can simply take a photo of the cheese, and the app will identify it, providing detailed information. Additionally, the chatbot will allow users to ask cheese-related questions. It will be powered by a RAG model and fine-tuned models, making it a specialist in cheese expertise.
+ND AI Master is an AI-powered Dungeon Master system that reimagines traditional Dungeons & Dragons gameplay using Retrieval-Augmented Generation (RAG) and Large Language Models (LLMs). The project builds an intelligent storytelling engine that dynamically generates narratives, dialogues, and game events based on player actions. Our system integrates a knowledge base of DnD rules, lore, and gameplay transcripts to ensure consistency and authenticity. Players interact through a chatbot-style interface—choosing characters, exploring maps, and engaging in adaptive adventures—all without needing a human Dungeon Master. The project combines scalable backend infrastructure, multimodal assets, and immersive design to make collaborative storytelling both intelligent and accessible.
 
 ### Project Workflow
 ![Project Workflow](figures/workflow.png)
@@ -27,12 +27,12 @@ In this project, we aim to develop an AI-powered cheese application. The app wil
 └── src
     ├── datapipeline
     │   ├── Dockerfile
-    │   ├── Pipfile
-    │   ├── Pipfile.lock
-    │   ├── docker-shell.sh
+    │   ├── pyproject.toml
+    │   ├── documentation.md
     └── models
         ├── Dockerfile
-        ├── docker-shell.sh
+        ├── pyproject.toml
+        ├── documentation.md
 ```
 
 
@@ -43,12 +43,9 @@ In this project, we aim to develop an AI-powered cheese application. The app wil
 
 ### End to End Containerized Pipeline
 
-
-
 #### Containerized Pipeline overview
 
 
-In this milestone, we have the components for data management, including versioning, as well as the computer vision and language models.
 
 <!-- **Data**
 We gathered a dataset of 100,000 cheese images representing approximately 1,500 different varieties. The dataset, approximately 100GB in size, was collected from the following sources: (1), (2), (3). We have stored it in a private Google Cloud Bucket.
