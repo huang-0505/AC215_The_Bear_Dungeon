@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: ./frontend        # Path to your Next.js app
+      dockerfile: Dockerfile
+    image: dnd/frontend:milestone2
+    container_name: dnd-frontend
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: "/api"  # or update later to your backend URL
+    ports:
+      - "3000:3000"              # Access at http://localhost:3000
+    restart: unless-stopped
