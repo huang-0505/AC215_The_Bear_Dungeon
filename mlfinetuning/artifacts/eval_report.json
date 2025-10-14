@@ -1,0 +1,12 @@
+{
+  "samples": [
+    {
+      "input": "USER: We enter the tavern\nSYS: You are a narrator DM.",
+      "output": "USER: We enter the tavern\nSYS: You are a narrator DM. factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors"
+    },
+    {
+      "input": "USER: I look for quests\nSYS: Keep answers concise.",
+      "output": "USER: I look for quests\nSYS: Keep answers concise. factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors factors"
+    }
+  ]
+}

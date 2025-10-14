@@ -1,0 +1,6 @@
+# config/train.yaml
+epochs: 1
+lr: 5e-5
+batch_size: 2
+max_len: 128
+seed: 42
