@@ -7,6 +7,9 @@ Our team is building an **AI Dungeon Master (DM)** that can narrate, guide, and 
 The **Milestone 2** branch focuses on the **containerization and deployment setup** across the full system — including the **frontend**, **backend**, **RAG orchestrator**, and **finetuning pipeline**.  
 Each module runs independently in Docker and communicates through internal networking defined in `docker-compose.yml`.
 
+## Project Workflow
+![Project Workflow](figures/workflow.png)
+
 The frontend stack includes:
 - ⚛️ **Next.js 14 (App Router)**
 - 🟦 **TypeScript**
@@ -53,6 +56,16 @@ AC215-DnD-Master/
 │   │   ├── infer_model.py
 │   │   ├── Dockerfile
 │   │   └── docker-shell.sh
+│   │
+│   ├── rag/                # Model training, inference, and RAG modules
+│   │   ├── agent_tools.py
+│   │   ├── cli.py
+│   │   ├── docker-compose.yml
+│   │   ├── semantic_splitting.py
+│   │   ├── uv.lock
+│   │   ├── Dockerfile
+│   │   └── docker-shell.sh  
+│   │
 │   │
 │   └── orchestrator/          # FastAPI orchestration and agent routing
 │       ├── app.py
