@@ -1,0 +1,9 @@
+# misc
+.DS_Store
+for_local_exp
+*py_cache
+*.log
+*.csv
+*.json
+/dataset-creator/data/*
+/dataset-creator/data/*

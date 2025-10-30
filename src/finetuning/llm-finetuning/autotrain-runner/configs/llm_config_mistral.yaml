@@ -1,0 +1,35 @@
+task: llm-sft
+base_model: mistralai/Mistral-7B-Instruct-v0.2
+project_name: autotrain-llama3-8b-sft-unsloth
+log: tensorboard
+backend: local
+
+data:
+  path: data
+  train_split: train
+  valid_split: test
+  chat_template: null
+  column_mapping:
+    text_column: text
+
+params:
+  block_size: 1024
+  model_max_length: 8192
+  max_prompt_length: 512
+  epochs: 1
+  batch_size: 1
+  lr: 3e-5
+  peft: true
+  quantization: int4
+  target_modules: all-linear
+  padding: right
+  optimizer: adamw_torch
+  scheduler: linear
+  gradient_accumulation: 4
+  mixed_precision: fp16
+  unsloth: False
+  lora_dropout: 0
+hub:
+  username: xxxx
+  token: xxxx
+  push_to_hub: False
