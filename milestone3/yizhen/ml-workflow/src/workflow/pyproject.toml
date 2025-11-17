@@ -1,0 +1,20 @@
+[project]
+name = "workflow"
+version = "0.1.0"
+description = "DnD Workflow for Gemini Fine-Tuning and MLOps Pipeline"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Vertex AI Python SDK (training + tuning + endpoint deployment)
+    "google-cloud-aiplatform>=1.127.0",
+
+    # Kubeflow Pipelines (KFP v2)
+    "kfp>=2.7.0",
+
+    # Needed by aiplatform for internal functionality
+    "google-cloud-storage>=2.14.0",
+    "google-api-core>=2.17.0",
+
+    # Optional but very useful for CLI
+    "pyyaml>=6.0.1",
+]

@@ -1,0 +1,17 @@
+[project]
+name = "dnd-model-training"
+version = "0.1.0"
+description = "Gemini Fine-tuning pipeline for AC215 DnD project"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "google-genai>=0.6.0",                 # Gemini model fine-tuning & inference
+    "google-cloud-storage>=2.16.0",        # Read/write training data from GCS
+    "google-cloud-aiplatform>=1.66.0",     # Vertex AI tuning, deployment, jobs
+    "pandas>=2.2.2",                       # Dataset handling
+    "numpy>=1.26",                         # Numeric utils
+    "tqdm>=4.66.4",                        # Progress bars
+    "rich>=13.7.1",                        # Pretty logs
+    "pyyaml>=6.0.1",                       # Config support
+]
