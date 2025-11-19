@@ -1,5 +1,8 @@
 fastapi
 uvicorn
+pydantic
 openai
 requests
-python-dotenv
+python-multipart
+google-genai
+google-auth

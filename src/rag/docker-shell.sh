@@ -6,7 +6,7 @@ set -e
 # Set vairables
 export BASE_DIR=$(pwd)
 export PERSISTENT_DIR=$(pwd)/../persistent-folder/
-export SECRETS_DIR=$(pwd)/../secrets/
+export SECRETS_DIR=$(pwd)/../../secrets/
 export GCP_PROJECT="aic215" # CHANGE TO YOUR PROJECT ID
 export GOOGLE_APPLICATION_CREDENTIALS="/secrets/dnd-master.json"
 export IMAGE_NAME="dnd-rag-cli"

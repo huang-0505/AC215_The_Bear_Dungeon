@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -8,7 +8,19 @@ import { Castle, TreePine, Skull, Crown, Compass, Zap, ArrowRight, ArrowLeft, Us
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 
-const campaignTypes = [
+// Icon mapping for campaign types
+const iconMap: Record<string, any> = {
+  "stormwreck-isle": Castle,
+  "classic-dungeon": Castle,
+  "wilderness-adventure": TreePine,
+  "gothic-horror": Skull,
+  "political-intrigue": Crown,
+  "seafaring-adventure": Compass,
+  "planar-adventure": Zap,
+}
+
+// Fallback campaigns in case API fails
+const fallbackCampaignTypes = [
   {
     id: "classic-dungeon",
     name: "Classic Dungeon Crawl",
@@ -98,7 +110,48 @@ const difficultyColors = {
 
 export default function StorySelect() {
   const [selectedCampaign, setSelectedCampaign] = useState<string | null>(null)
+  const [campaigns, setCampaigns] = useState<any[]>(fallbackCampaignTypes)
+  const [loading, setLoading] = useState(true)
   const router = useRouter()
+
+  // Fetch campaigns from orchestrator API
+  useEffect(() => {
+    async function fetchCampaigns() {
+      try {
+        const response = await fetch('/api/campaigns')
+        const data = await response.json()
+
+        if (data.campaigns && Array.isArray(data.campaigns)) {
+          // Transform API campaigns to match UI format
+          const transformed = data.campaigns.map((c: any) => ({
+            id: c.id,
+            name: c.name,
+            icon: iconMap[c.id] || Castle,
+            description: c.description,
+            setting: c.starting_location || "Unknown location",
+            difficulty: c.difficulty === "beginner" ? "Beginner Friendly" :
+                       c.difficulty === "medium" ? "Moderate" :
+                       c.difficulty === "hard" ? "Advanced" :
+                       c.difficulty === "very hard" ? "Expert" : "Moderate",
+            duration: "3-5 hours",
+            themes: ["Adventure", "Exploration", "D&D 5e"],
+            color: "text-purple-400",
+            bgColor: "bg-purple-500/20",
+            borderColor: "border-purple-500/30",
+          }))
+
+          setCampaigns(transformed)
+        }
+      } catch (error) {
+        console.error('Failed to fetch campaigns from orchestrator:', error)
+        // Keep fallback campaigns
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchCampaigns()
+  }, [])
 
   const handleContinue = () => {
     if (selectedCampaign) {
@@ -108,7 +161,7 @@ export default function StorySelect() {
     }
   }
 
-  const selectedCampaignData = campaignTypes.find((c) => c.id === selectedCampaign)
+  const selectedCampaignData = campaigns.find((c) => c.id === selectedCampaign)
 
   return (
     <div className="min-h-screen bg-background text-foreground particle-bg">
@@ -156,7 +209,7 @@ export default function StorySelect() {
 
           {/* Campaign Types Grid */}
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
-            {campaignTypes.map((campaign) => {
+            {campaigns.map((campaign) => {
               const Icon = campaign.icon
               const isSelected = selectedCampaign === campaign.id
 

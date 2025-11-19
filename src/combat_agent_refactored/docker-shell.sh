@@ -8,7 +8,7 @@ set -e
 # Configuration
 export IMAGE_NAME="dnd-combat-simulator"
 export BASE_DIR=$(pwd)
-export SECRETS_DIR=$(pwd)/../../../secrets
+export SECRETS_DIR=$(pwd)/../../secrets
 export GCP_PROJECT="aic215"
 export GCP_LOCATION="us-central1"
 export GCP_ZONE="us-central1-a"

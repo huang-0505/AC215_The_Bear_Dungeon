@@ -27,8 +27,8 @@ EMBEDDING_DIMENSION = 256
 GENERATIVE_MODEL = "gemini-2.0-flash-001"
 INPUT_FOLDER = "input-datasets"
 OUTPUT_FOLDER = "outputs"
-CHROMADB_HOST = "llm-rag-chromadb"
-CHROMADB_PORT = 8000
+CHROMADB_HOST = os.environ.get("CHROMADB_HOST", "llm-rag-chromadb")
+CHROMADB_PORT = int(os.environ.get("CHROMADB_PORT", "8000"))
 
 #############################################################################
 #                       Initialize the LLM Client                           #

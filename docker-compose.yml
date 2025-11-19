@@ -18,19 +18,74 @@ services:
     networks:
       - dnd-master-network
 
+  # Rule Agent (RAG-based D&D rules validation)
+  rule-agent:
+    build:
+      context: ./src/rule_agent
+      dockerfile: Dockerfile
+    image: dnd/rule-agent:milestone4
+    container_name: dnd-rule-agent
+    environment:
+      GCP_PROJECT: ${GCP_PROJECT}
+      GCP_LOCATION: us-central1
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/llm-service-account.json
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+    volumes:
+      - ./secrets:/secrets:ro
+    expose:
+      - "9002"
+    restart: unless-stopped
+    depends_on:
+      - chromadb
+    command: ["/bin/bash", "-c", "uv run uvicorn app:app --host 0.0.0.0 --port 9002"]
+    networks:
+      - dnd-master-network
+
+  # Combat Agent (backend-tmp)
+  combat-agent:
+    build:
+      context: ./src/backend-tmp
+      dockerfile: Dockerfile
+    image: dnd/combat-agent:milestone4
+    container_name: dnd-combat-agent
+    environment:
+      GCP_PROJECT: ${GCP_PROJECT}
+      GCP_LOCATION: us-central1
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/ml-workflow.json
+    volumes:
+      - ./secrets:/secrets:ro
+    expose:
+      - "9000"
+    restart: unless-stopped
+    networks:
+      - dnd-master-network
+
+  # Orchestrator (main game controller with rule validation)
   api-gateway:
     build:
       context: ./src/orchestrator
       dockerfile: Dockerfile
-    image: dnd/api-gateway:milestone2
+    image: dnd/api-gateway:milestone4
     container_name: dnd-api-gateway
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GCP_PROJECT: ${GCP_PROJECT}
+      GCP_LOCATION: us-central1
+      NARRATOR_ENDPOINT_ID: "5165249441082376192"
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/llm-service-account.json
+      RULE_AGENT_URL: http://rule-agent:9002
+      COMBAT_AGENT_URL: http://combat-agent:9000
+      NARRATOR_AGENT_URL: http://narrator-agent:9001
+    volumes:
+      - ./secrets:/secrets:ro
     expose:
       - "8000"
     restart: unless-stopped
     depends_on:
       - chromadb
+      - rule-agent
+      - combat-agent
     networks:
       - dnd-master-network
 
@@ -55,44 +110,9 @@ services:
       - web
       - api-gateway
     ports:
-      - "80:80"
+      - "8080:80"
     volumes:
       - ./src/infra/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    networks:
-      - dnd-master-network
-
-  rag:
-    build:
-      context: ./src/rag
-      dockerfile: Dockerfile
-    image: dnd/rag-cli:milestone2
-    container_name: dnd-rag-cli
-    environment:
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS}
-      GCP_PROJECT: ${GCP_PROJECT}
-    volumes:
-      - ./src/rag:/app
-      - ./secrets:/secrets
-    depends_on:
-      - chromadb
-    command: ["/bin/bash", "-lc", "sleep infinity"]
-    networks:
-      - dnd-master-network
-
-  finetuning:
-    build:
-      context: ./src/finetuning
-      dockerfile: Dockerfile
-    image: dnd/finetuning:milestone2
-    container_name: dnd-finetuning
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS}
-      GCP_PROJECT: ${GCP_PROJECT}
-    volumes:
-      - ./src/finetuning:/app
-      - ./secrets:/secrets
-    command: ["/bin/bash", "-lc", "sleep infinity"]
     networks:
       - dnd-master-network
 

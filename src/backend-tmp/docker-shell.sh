@@ -6,7 +6,7 @@ set -e
 # Define some environment variables
 export IMAGE_NAME="cheese-app-api-service"
 export BASE_DIR=$(pwd)
-export SECRETS_DIR=$(pwd)/../../../secrets/
+export SECRETS_DIR=$(pwd)/../../secrets/
 export PERSISTENT_DIR=$(pwd)/../../../persistent-folder/
 export GCP_PROJECT="aic215" # CHANGE TO YOUR PROJECT ID
 export GCS_BUCKET_NAME="cheese-app-models-v2"

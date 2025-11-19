@@ -11,5 +11,6 @@ echo "UV version: $(uv --version)"
 echo "Activating virtual environment..."
 source /.venv/bin/activate
 
-# Keep a shell open
-exec /bin/bash
+# Execute the command passed to the container
+echo "Executing command: $@"
+exec "$@"

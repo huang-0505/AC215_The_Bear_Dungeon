@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>D&D Master - Unified Game Interface</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        .campaign-selector {
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 30px;
+            background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
+            border: 2px solid #8b4513;
+            border-radius: 10px;
+        }
+
+        .campaign-card {
+            background: #3a3a3a;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .campaign-card:hover {
+            border-color: #d4af37;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(212, 175, 55, 0.3);
+        }
+
+        .campaign-card.selected {
+            border-color: #d4af37;
+            background: #4a4a4a;
+        }
+
+        .difficulty-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+
+        .difficulty-beginner { background: #28a745; }
+        .difficulty-medium { background: #ffc107; color: #000; }
+        .difficulty-hard { background: #dc3545; }
+        .difficulty-very-hard { background: #6f42c1; }
+
+        .character-creation {
+            margin-top: 20px;
+            padding: 20px;
+            background: #2a2a2a;
+            border-radius: 8px;
+        }
+
+        .game-interface {
+            display: none;
+        }
+
+        .game-interface.active {
+            display: block;
+        }
+
+        .state-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: #d4af37;
+            color: #000;
+            border-radius: 20px;
+            font-weight: bold;
+        }
+
+        .narration-mode { background: #4a90e2; color: white; }
+        .combat-mode { background: #e74c3c; color: white; }
+    </style>
+</head>
+<body>
+    <!-- State Indicator -->
+    <div id="stateIndicator" class="state-indicator" style="display: none;">
+        <span id="currentMode">Narration Mode</span>
+    </div>
+
+    <!-- Campaign Selection Screen -->
+    <div id="campaignSelector" class="campaign-selector">
+        <h1 style="color: #d4af37; text-align: center; font-size: 2.5em; margin-bottom: 30px;">
+            🐉 Choose Your Adventure
+        </h1>
+
+        <div id="campaignList"></div>
+
+        <!-- Character Creation (shown after campaign selection) -->
+        <div id="characterCreation" class="character-creation" style="display: none;">
+            <h2 style="color: #d4af37;">Create Your Character</h2>
+
+            <label>Character Name:</label>
+            <input type="text" id="characterName" placeholder="Enter your character's name" class="styledInput">
+
+            <label>Character Class:</label>
+            <select id="characterClass" class="styledInput">
+                <option value="Fighter">Fighter</option>
+                <option value="Wizard">Wizard</option>
+                <option value="Rogue">Rogue</option>
+                <option value="Cleric">Cleric</option>
+                <option value="Ranger">Ranger</option>
+                <option value="Bard">Bard</option>
+                <option value="Paladin">Paladin</option>
+                <option value="Barbarian">Barbarian</option>
+            </select>
+
+            <button id="startGameBtn" class="btn btn-primary" style="margin-top: 20px; width: 100%;">
+                Begin Adventure!
+            </button>
+        </div>
+    </div>
+
+    <!-- Narration Interface -->
+    <div id="narrationInterface" class="game-interface">
+        <div class="container">
+            <h1 style="color: #d4af37; text-align: center;">📜 D&D Adventure</h1>
+
+            <div id="campaignInfo" style="background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h3 id="campaignTitle" style="color: #d4af37;"></h3>
+                <p id="currentQuest" style="color: #999;"></p>
+            </div>
+
+            <div id="dialogueScroll" class="dialogue-scroll"></div>
+
+            <div class="action-panel">
+                <input
+                    type="text"
+                    id="narrationInput"
+                    placeholder="What do you do?"
+                    class="styledInput"
+                />
+                <button id="submitNarrationBtn" class="btn btn-primary">Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Combat Interface (reuse from main.js) -->
+    <div id="combatInterface" class="game-interface">
+        <!-- Combat UI from your existing frontend-tmp -->
+    </div>
+
+    <script>
+        const ORCHESTRATOR_URL = 'http://localhost:8000';
+
+        class UnifiedGameApp {
+            constructor() {
+                this.sessionId = null;
+                this.selectedCampaign = null;
+                this.currentMode = 'narration'; // 'narration' or 'combat'
+
+                this.api = axios.create({
+                    baseURL: ORCHESTRATOR_URL
+                });
+
+                this.init();
+            }
+
+            async init() {
+                await this.loadCampaigns();
+                this.setupEventListeners();
+            }
+
+            async loadCampaigns() {
+                try {
+                    const response = await this.api.get('/campaigns');
+                    this.displayCampaigns(response.data.campaigns);
+                } catch (error) {
+                    console.error('Error loading campaigns:', error);
+                    alert('Could not load campaigns. Make sure the orchestrator is running.');
+                }
+            }
+
+            displayCampaigns(campaigns) {
+                const container = document.getElementById('campaignList');
+                container.innerHTML = campaigns.map(campaign => `
+                    <div class="campaign-card" data-campaign-id="${campaign.id}">
+                        <h3 style="color: #d4af37; margin-top: 0;">
+                            ${campaign.name}
+                            <span class="difficulty-badge difficulty-${campaign.difficulty}">
+                                ${campaign.difficulty.toUpperCase()}
+                            </span>
+                        </h3>
+                        <p style="color: #ccc;">${campaign.description}</p>
+                    </div>
+                `).join('');
+
+                // Add click handlers
+                document.querySelectorAll('.campaign-card').forEach(card => {
+                    card.addEventListener('click', () => this.selectCampaign(card.dataset.campaignId, card));
+                });
+            }
+
+            selectCampaign(campaignId, cardElement) {
+                this.selectedCampaign = campaignId;
+
+                // Highlight selected
+                document.querySelectorAll('.campaign-card').forEach(c => c.classList.remove('selected'));
+                cardElement.classList.add('selected');
+
+                // Show character creation
+                document.getElementById('characterCreation').style.display = 'block';
+            }
+
+            setupEventListeners() {
+                document.getElementById('startGameBtn').addEventListener('click', () => this.startGame());
+                document.getElementById('submitNarrationBtn').addEventListener('click', () => this.submitNarrationAction());
+
+                document.getElementById('narrationInput').addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.submitNarrationAction();
+                });
+            }
+
+            async startGame() {
+                const characterName = document.getElementById('characterName').value.trim();
+                const characterClass = document.getElementById('characterClass').value;
+
+                if (!characterName) {
+                    alert('Please enter a character name!');
+                    return;
+                }
+
+                try {
+                    const response = await this.api.post('/game/start', {
+                        campaign_id: this.selectedCampaign,
+                        character_class: characterClass,
+                        character_name: characterName
+                    });
+
+                    this.sessionId = response.data.session_id;
+                    const campaignInfo = response.data.campaign_info;
+
+                    // Hide campaign selector
+                    document.getElementById('campaignSelector').style.display = 'none';
+
+                    // Show game interface
+                    this.switchToNarration();
+
+                    // Display campaign info
+                    document.getElementById('campaignTitle').textContent = campaignInfo.campaign_name;
+                    document.getElementById('currentQuest').textContent = `Quest: ${campaignInfo.initial_quest}`;
+
+                    // Display opening narrative
+                    this.addNarrative(response.data.response);
+
+                    // Show state indicator
+                    document.getElementById('stateIndicator').style.display = 'block';
+
+                } catch (error) {
+                    console.error('Error starting game:', error);
+                    alert('Failed to start game: ' + error.message);
+                }
+            }
+
+            async submitNarrationAction() {
+                const input = document.getElementById('narrationInput');
+                const action = input.value.trim();
+
+                if (!action) return;
+
+                // Show player action
+                this.addPlayerMessage(action);
+                input.value = '';
+
+                try {
+                    const response = await this.api.post('/game/action', {
+                        session_id: this.sessionId,
+                        text: action
+                    });
+
+                    // Check for state transition
+                    if (response.data.transition === 'narration -> combat') {
+                        this.switchToCombat(response.data.state_node.combat_session_id);
+                    }
+
+                    // Display response
+                    this.addNarrative(response.data.response);
+
+                    // Show validation info if available
+                    if (response.data.validation && response.data.validation.rule_text) {
+                        this.addRuleInfo(response.data.validation);
+                    }
+
+                } catch (error) {
+                    console.error('Error submitting action:', error);
+                    this.addNarrative('Error: ' + error.message);
+                }
+            }
+
+            switchToNarration() {
+                this.currentMode = 'narration';
+                document.getElementById('narrationInterface').classList.add('active');
+                document.getElementById('combatInterface').classList.remove('active');
+
+                const indicator = document.getElementById('currentMode');
+                indicator.textContent = '📜 Narration Mode';
+                indicator.parentElement.className = 'state-indicator narration-mode';
+            }
+
+            switchToCombat(combatSessionId) {
+                this.currentMode = 'combat';
+                document.getElementById('narrationInterface').classList.remove('active');
+                document.getElementById('combatInterface').classList.add('active');
+
+                const indicator = document.getElementById('currentMode');
+                indicator.textContent = '⚔️ Combat Mode';
+                indicator.parentElement.className = 'state-indicator combat-mode';
+
+                // TODO: Initialize combat interface with combatSessionId
+                this.addNarrative('Combat mode activated! (Combat UI integration needed)');
+            }
+
+            addNarrative(text) {
+                const scroll = document.getElementById('dialogueScroll');
+                const div = document.createElement('div');
+                div.className = 'message ai-message';
+                div.innerHTML = `
+                    <div class="message-header">DM</div>
+                    <div class="message-content">${this.formatText(text)}</div>
+                `;
+                scroll.appendChild(div);
+                scroll.scrollTop = scroll.scrollHeight;
+            }
+
+            addPlayerMessage(text) {
+                const scroll = document.getElementById('dialogueScroll');
+                const div = document.createElement('div');
+                div.className = 'message player-message';
+                div.innerHTML = `
+                    <div class="message-header">You</div>
+                    <div class="message-content">${text}</div>
+                `;
+                scroll.appendChild(div);
+                scroll.scrollTop = scroll.scrollHeight;
+            }
+
+            addRuleInfo(validation) {
+                const scroll = document.getElementById('dialogueScroll');
+                const div = document.createElement('div');
+                div.className = 'message system-message';
+                div.innerHTML = `
+                    <div class="message-header">📖 D&D Rules</div>
+                    <div class="message-content">
+                        <em>${validation.explanation}</em>
+                    </div>
+                `;
+                div.style.background = '#2a4a2a';
+                div.style.borderColor = '#4a7c4a';
+                scroll.appendChild(div);
+                scroll.scrollTop = scroll.scrollHeight;
+            }
+
+            formatText(text) {
+                return text.replace(/\n/g, '<br>');
+            }
+        }
+
+        // Initialize app when page loads
+        window.addEventListener('DOMContentLoaded', () => {
+            window.gameApp = new UnifiedGameApp();
+        });
+    </script>
+</body>
+</html>

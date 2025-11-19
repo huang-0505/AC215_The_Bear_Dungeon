@@ -93,6 +93,7 @@ export default function GameInterface() {
   const [inputValue, setInputValue] = useState("")
   const [isAiThinking, setIsAiThinking] = useState(false)
   const [showUpload, setShowUpload] = useState(false)
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -101,32 +102,43 @@ export default function GameInterface() {
     setCharacterClass(selectedClass)
     setSelectedCampaign(campaign)
 
-    const characterOpening = getCharacterOpening(selectedClass, campaign)
+    // Start game session with orchestrator
+    async function startGameSession() {
+      try {
+        const response = await fetch('/api/game/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            campaign_id: campaign,
+            character_class: selectedClass,
+            character_name: selectedClass, // Use class name as default
+          }),
+        })
 
-    const campaignScenarios = {
-      "classic-dungeon":
-        "Stone corridors stretch into darkness ahead, and you can hear the distant echo of dripping water. What do you do?",
-      "wilderness-adventure":
-        "The forest path splits in three directions, each leading deeper into the untamed wilderness. What do you do?",
-      "gothic-horror":
-        "Lightning illuminates the twisted spires of a decrepit manor house. Something moves in an upstairs window. What do you do?",
-      "political-intrigue":
-        "Whispered conversations halt as you enter the grand ballroom. All eyes turn to you with calculating interest. What do you do?",
-      "seafaring-adventure":
-        "The ship's captain points to storm clouds gathering on the horizon. 'We need to make port soon,' he warns. What do you do?",
-      "planar-adventure":
-        "Reality shimmers around you as you step through the portal. The laws of physics seem... negotiable here. What do you do?",
+        const data = await response.json()
+        setSessionId(data.session_id)
+
+        // Add initial narrative as first message
+        const initialMessage: Message = {
+          author: "ai",
+          text: data.response,
+          timestamp: Date.now(),
+        }
+        setMessages([initialMessage])
+      } catch (error) {
+        console.error('Failed to start game session:', error)
+        // Fallback to local opening
+        const characterOpening = getCharacterOpening(selectedClass, campaign)
+        const initialMessage: Message = {
+          author: "ai",
+          text: `${characterOpening} (Failed to connect to game server - using offline mode)`,
+          timestamp: Date.now(),
+        }
+        setMessages([initialMessage])
+      }
     }
 
-    const scenario =
-      campaignScenarios[campaign as keyof typeof campaignScenarios] || campaignScenarios["classic-dungeon"]
-
-    const initialMessage: Message = {
-      author: "ai",
-      text: `${characterOpening} ${scenario}`,
-      timestamp: Date.now(),
-    }
-    setMessages([initialMessage])
+    startGameSession()
   }, [])
 
   const scrollToBottom = () => {
@@ -139,7 +151,7 @@ export default function GameInterface() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!inputValue.trim() || isAiThinking) return
+    if (!inputValue.trim() || isAiThinking || !sessionId) return
 
     // Add player message
     const playerMessage: Message = {
@@ -148,35 +160,40 @@ export default function GameInterface() {
       timestamp: Date.now(),
     }
 
-    const updatedMessages = [...messages, playerMessage]
-    setMessages(updatedMessages)
+    setMessages((prev) => [...prev, playerMessage])
     setInputValue("")
     setIsAiThinking(true)
 
     try {
-      const response = await fetch("/api/dm", {
+      const response = await fetch("/api/game/action", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          messages: updatedMessages,
-          characterClass,
-          selectedCampaign,
+          session_id: sessionId,
+          text: inputValue.trim(),
         }),
       })
 
       const data = await response.json()
 
+      let responseText = data.response
+
+      // Add rule validation feedback if action was invalid
+      if (data.validation && !data.validation.is_valid) {
+        responseText = `⚠️  **Rule Check:** ${data.validation.explanation}\n\n${responseText}`
+      }
+
       const aiMessage: Message = {
         author: "ai",
-        text: data.text,
+        text: responseText,
         timestamp: Date.now(),
       }
 
       setMessages((prev) => [...prev, aiMessage])
     } catch (error) {
-      console.error("Error calling AI DM:", error)
+      console.error("Error calling orchestrator:", error)
       const errorMessage: Message = {
         author: "ai",
         text: "The mystical connection wavers... *The DM seems to be having trouble hearing you. Please try again.*",
