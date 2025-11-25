@@ -321,7 +321,7 @@ def call_combat_agent_action(session_id: str, action: str, rules_context: Option
         response = requests.post(
             f"{COMBAT_AGENT_URL}/combat/action/{session_id}",
             json={"action": action},
-            timeout=10
+            timeout=15  # Increased to 15 seconds to account for GenAI processing (3s timeout + buffer)
         )
         response.raise_for_status()
         return response.json()
@@ -332,7 +332,7 @@ def call_combat_agent_action(session_id: str, action: str, rules_context: Option
             try:
                 state_response = requests.get(
                     f"{COMBAT_AGENT_URL}/combat/state/{session_id}",
-                    timeout=10
+                    timeout=15  # Increased timeout for consistency
                 )
                 state_response.raise_for_status()
                 state_data = state_response.json()
@@ -1094,7 +1094,7 @@ def get_combat_state(combat_session_id: str):
         logger.info(f"Fetching combat state for combat session: {combat_session_id}")
         response = requests.get(
             f"{COMBAT_AGENT_URL}/combat/state/{combat_session_id}",
-            timeout=10
+            timeout=15  # Consistent timeout
         )
         response.raise_for_status()
         return response.json()

@@ -67,7 +67,7 @@ End a combat session.
 
 ### Setup
 
-1. Place your GCP credentials in `../../../secrets/ml-workflow.json`
+1. Place your GCP credentials in `../../../secrets/llm-service-account.json`
 
 2. Update `docker-shell.sh` with your GCP project:
    ```bash

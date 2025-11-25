@@ -142,23 +142,32 @@ class DnDBot:
         gcp_location = os.environ.get("GCP_LOCATION", "us-central1")
         self.client = None
         self.use_llm = False
+        print(f"[DnDBot] Initializing with GCP_PROJECT={gcp_project}, GCP_LOCATION={gcp_location}")
         try:
             if gcp_project:
+                print(f"[DnDBot] Attempting to initialize GenAI client...")
                 self.client = genai.Client(
                     vertexai=True,
                     project=gcp_project,
                     location=gcp_location
                 )
                 self.use_llm = True
+                print(f"[DnDBot] GenAI client initialized successfully, use_llm=True")
             else:
-                print("GCP_PROJECT not set, enemy bot will use simple attack strategy")
+                print("[DnDBot] GCP_PROJECT not set, enemy bot will use simple attack strategy")
         except Exception as e:
-            print(f"Failed to initialize GenAI client: {e}, using fallback strategy")
+            print(f"[DnDBot] Failed to initialize GenAI client: {e}, using fallback strategy")
+            import traceback
+            traceback.print_exc()
         self.parser = ActionParserBot(engine)
 
     def _call_genai_sync(self, prompt: str) -> Optional[str]:
         """Synchronous GenAI call (runs in thread pool)"""
+        if not self.client:
+            print(f"[DnDBot._call_genai_sync] ERROR: Client is None, cannot make GenAI call")
+            return None
         try:
+            print(f"[DnDBot._call_genai_sync] Making GenAI API call...")
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
@@ -167,9 +176,13 @@ class DnDBot:
                     temperature=0.7,
                 )
             )
-            return response.text if response and response.text else None
+            result = response.text if response and response.text else None
+            print(f"[DnDBot._call_genai_sync] GenAI API call completed, result length: {len(result) if result else 0}")
+            return result
         except Exception as e:
-            print(f"GenAI call error: {e}")
+            print(f"[DnDBot._call_genai_sync] GenAI call error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     async def decide_action(self) -> Optional[dict]:
@@ -181,16 +194,20 @@ class DnDBot:
         Returns:
             Action data dict or None if decision fails
         """
+        print(f"[DnDBot] decide_action() called")
         actor = self.engine.current_actor
         if not actor:
+            print(f"[DnDBot] ERROR: No current actor")
             return None
 
         alive_players = self.engine.state.get_alive(role="player")
         if not alive_players:
+            print(f"[DnDBot] ERROR: No alive players")
             return None
         
         # Default fallback target
         target = random.choice(alive_players)
+        print(f"[DnDBot] Selected fallback target: {target.name}")
         
         # Try to use LLM for more interesting actions (only if client is available)
         if self.use_llm and self.client:
@@ -212,31 +229,53 @@ Example: "I attack {target.name} with my weapon"
 """
 
                 # Run GenAI call in thread pool with 5 second timeout
-                loop = asyncio.get_event_loop()
+                # Use get_running_loop() for better async compatibility (Python 3.7+)
                 try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # Fallback if no running loop (shouldn't happen in FastAPI)
+                    loop = asyncio.get_event_loop()
+                
+                print(f"[DnDBot] Starting GenAI call for {actor.name} (timeout: 3s)")
+                try:
+                    # Use a shorter timeout (3 seconds) to fail fast
                     action_text = await asyncio.wait_for(
                         loop.run_in_executor(_genai_executor, self._call_genai_sync, analysis_prompt),
-                        timeout=5.0
+                        timeout=3.0
                     )
+                    print(f"[DnDBot] GenAI call completed for {actor.name}")
                     
                     if action_text:
                         # Parse LLM output into structured action
                         action = self.parser.parse(actor, action_text)
                         if action:
+                            print(f"[DnDBot] Successfully parsed AI action: {action}")
                             return action
+                        else:
+                            print(f"[DnDBot] Failed to parse AI response, using fallback")
+                    else:
+                        print(f"[DnDBot] Empty AI response, using fallback")
                 except asyncio.TimeoutError:
-                    print(f"GenAI call timed out after 5 seconds, using fallback")
+                    print(f"[DnDBot] GenAI call timed out after 3 seconds for {actor.name}, using fallback")
                 except Exception as e:
-                    print(f"Error in async AI decision: {e}")
+                    print(f"[DnDBot] Error in async AI decision for {actor.name}: {e}")
+                    import traceback
+                    traceback.print_exc()
             except Exception as e:
-                print(f"Error setting up AI decision (using fallback): {e}")
+                print(f"[DnDBot] Error setting up AI decision (using fallback): {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[DnDBot] GenAI not available (use_llm={self.use_llm}, client={self.client is not None}), using fallback")
         
         # Fallback to simple attack (always works, never hangs)
-        return {
+        fallback_action = {
             "id": 0,
             "type": "MeleeAttack",
             "target": target
         }
+        print(f"[DnDBot] Returning fallback action: {fallback_action}")
+        return fallback_action
 
 
 class DnDNarrator:
@@ -246,15 +285,52 @@ class DnDNarrator:
         self.model = model
         gcp_project = os.environ.get("GCP_PROJECT")
         gcp_location = os.environ.get("GCP_LOCATION", "us-central1")
-        self.client = genai.Client(
-            vertexai=True,
-            project=gcp_project,
-            location=gcp_location
-        )
+        self.client = None
+        self.use_genai = False
+        try:
+            if gcp_project:
+                print(f"[DnDNarrator] Initializing GenAI client...")
+                self.client = genai.Client(
+                    vertexai=True,
+                    project=gcp_project,
+                    location=gcp_location
+                )
+                self.use_genai = True
+                print(f"[DnDNarrator] GenAI client initialized successfully")
+            else:
+                print(f"[DnDNarrator] GCP_PROJECT not set, using fallback narration")
+        except Exception as e:
+            print(f"[DnDNarrator] Failed to initialize GenAI client: {e}, using fallback narration")
+            self.client = None
+            self.use_genai = False
 
-    def narrate(self, user_query: str, action_result: str) -> str:
+    def _call_genai_sync(self, prompt: str) -> Optional[str]:
+        """Synchronous GenAI call for narration (runs in thread pool)"""
+        if not self.client:
+            return None
+        try:
+            print(f"[DnDNarrator._call_genai_sync] Making GenAI API call...")
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=200,
+                    temperature=0.8,
+                )
+            )
+            result = response.text.strip() if response and response.text else None
+            print(f"[DnDNarrator._call_genai_sync] GenAI API call completed, result length: {len(result) if result else 0}")
+            return result
+        except Exception as e:
+            print(f"[DnDNarrator._call_genai_sync] GenAI call error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    async def narrate(self, user_query: str, action_result: str) -> str:
         """
         Generate vivid narrative combining player intent and mechanical result.
+        Uses async with timeout to prevent blocking.
 
         Args:
             user_query: Player's action description
@@ -263,6 +339,11 @@ class DnDNarrator:
         Returns:
             Dramatic narrative description
         """
+        # If GenAI is not available, return simple narration immediately
+        if not self.use_genai or not self.client:
+            print(f"[DnDNarrator] GenAI not available, using fallback narration")
+            return action_result
+
         narrative_prompt = f"""
 You are a DnD Narrator describing an epic battle scene.
 
@@ -281,17 +362,29 @@ Be dramatic and immersive. Make it feel epic!
 """
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=narrative_prompt,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=200,
-                    temperature=0.8,
+            print(f"[DnDNarrator] Generating narrative...")
+            loop = asyncio.get_running_loop()
+            try:
+                narrative_text = await asyncio.wait_for(
+                    loop.run_in_executor(_genai_executor, self._call_genai_sync, narrative_prompt),
+                    timeout=5.0  # 5 second timeout for narration
                 )
-            )
-
-            return response.text.strip()
+                if narrative_text:
+                    print(f"[DnDNarrator] Narrative generated successfully")
+                    return narrative_text
+                else:
+                    print(f"[DnDNarrator] Empty narrative response, using fallback")
+                    return action_result
+            except asyncio.TimeoutError:
+                print(f"[DnDNarrator] Narrative generation timed out after 5 seconds, using fallback")
+                return action_result
+            except Exception as e:
+                print(f"[DnDNarrator] Error in async narration: {e}")
+                import traceback
+                traceback.print_exc()
+                return action_result
         except Exception as e:
-            print(f"Error in narration: {e}")
-            # Fallback to basic narration
+            print(f"[DnDNarrator] Error setting up narration (using fallback): {e}")
+            import traceback
+            traceback.print_exc()
             return action_result

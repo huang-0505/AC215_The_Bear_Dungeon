@@ -39,6 +39,9 @@ export default function CombatPage() {
   const [gameOver, setGameOver] = useState(false)
   const [isInitializing, setIsInitializing] = useState(true)
   const dialogueScrollRef = useRef<HTMLDivElement>(null)
+  const enemyTurnInProgress = useRef(false)
+  const combatSessionIdRef = useRef<string | null>(null)
+  const gameOverRef = useRef(false)
 
   // Get combat session ID from URL or localStorage
   useEffect(() => {
@@ -67,6 +70,8 @@ export default function CombatPage() {
       if (sessionId) {
         console.log("✅ Session ID found:", sessionId)
         setCombatSessionId(sessionId)
+        combatSessionIdRef.current = sessionId
+        gameOverRef.current = false
         localStorage.setItem("combat_session_id", sessionId)
         setShowActionPanel(true)
         setIsInitializing(false)
@@ -88,6 +93,7 @@ export default function CombatPage() {
           if (retrySessionId) {
             console.log("✅ Session ID found on retry:", retrySessionId)
             setCombatSessionId(retrySessionId)
+            combatSessionIdRef.current = retrySessionId
             localStorage.setItem("combat_session_id", retrySessionId)
             setShowActionPanel(true)
             setIsInitializing(false)
@@ -183,10 +189,33 @@ export default function CombatPage() {
 
     if (isPlayer) {
       setIsPlayerTurn(true)
+      enemyTurnInProgress.current = false // Reset flag when player turn
     } else if (isEnemy) {
       setIsPlayerTurn(false)
-      // Automatically trigger enemy turn
-      setTimeout(() => triggerEnemyTurn(), 1500)
+      // Only trigger enemy turn if not already in progress and not loading
+      // Add a small delay to ensure previous turn processing is complete
+      if (!enemyTurnInProgress.current && !isLoading) {
+        console.log("[Frontend] Detected enemy turn, will trigger in 1.5s:", currentActor)
+        setTimeout(() => {
+          // Double-check conditions before triggering
+          if (!enemyTurnInProgress.current && !isLoading && combatSessionId && !gameOver) {
+            console.log("[Frontend] Timeout fired, calling triggerEnemyTurn()")
+            triggerEnemyTurn()
+          } else {
+            console.log("[Frontend] Conditions changed, skipping enemy turn trigger:", {
+              enemyTurnInProgress: enemyTurnInProgress.current,
+              isLoading,
+              combatSessionId: !!combatSessionId,
+              gameOver
+            })
+          }
+        }, 1500)
+      } else {
+        console.log("[Frontend] Enemy turn already in progress or loading, skipping trigger:", {
+          enemyTurnInProgress: enemyTurnInProgress.current,
+          isLoading
+        })
+      }
     }
   }
 
@@ -199,6 +228,7 @@ export default function CombatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: actionInput.trim() }),
+        signal: AbortSignal.timeout(20000), // 20 second timeout
       })
 
       const data = await response.json()
@@ -220,29 +250,69 @@ export default function CombatPage() {
       }
 
       setActionInput("")
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error submitting action:", error)
-      setNarratives(prev => [...prev, "Error: Failed to submit action"])
+      if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+        setNarratives(prev => [...prev, "⚠️ Request timed out. Please try again."])
+      } else {
+        setNarratives(prev => [...prev, `Error: ${error.message || "Failed to submit action"}`])
+      }
     } finally {
       setIsLoading(false)
     }
   }
 
   const triggerEnemyTurn = async () => {
-    if (!combatSessionId || isLoading || gameOver) return
+    // Prevent duplicate calls - if already in progress, skip
+    if (enemyTurnInProgress.current) {
+      console.log("[Frontend] Enemy turn already in progress, skipping duplicate call")
+      return
+    }
 
+    if (!combatSessionId || gameOver) {
+      console.log("[Frontend] Skipping enemy turn - basic conditions not met:", {
+        combatSessionId: !!combatSessionId,
+        gameOver
+      })
+      enemyTurnInProgress.current = false
+      return
+    }
+
+    console.log("[Frontend] Starting enemy turn processing...")
     setIsLoading(true)
+    enemyTurnInProgress.current = true
     try {
+      console.log("[Frontend] Triggering enemy turn for session:", combatSessionId)
       const response = await fetch(`/api/combat/action/${combatSessionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "enemy_turn" }),
+        signal: AbortSignal.timeout(20000), // 20 second timeout (frontend timeout should be longer than API timeout)
       })
 
+      console.log("[Frontend] Enemy turn response status:", response.status, response.ok)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error("[Frontend] Enemy turn failed:", response.status, errorText)
+        let errorData = {}
+        try {
+          errorData = JSON.parse(errorText)
+        } catch {
+          errorData = { detail: errorText }
+        }
+        throw new Error(errorData.detail || `HTTP ${response.status}: ${errorText}`)
+      }
+
       const data = await response.json()
+      console.log("[Frontend] Enemy turn response data:", data)
       
       // Add narrative
       setNarratives(prev => [...prev, data.narrative || data.message || "Enemy acts"])
+      
+      // Reset flag BEFORE checking turn to allow checkTurn to work properly
+      enemyTurnInProgress.current = false
+      setIsLoading(false)
       
       // Update state
       if (data.state) {
@@ -254,12 +324,67 @@ export default function CombatPage() {
           return
         }
         
-        checkTurn(data.state)
+        // Small delay before checkTurn to ensure state is fully updated
+        setTimeout(() => {
+          checkTurn(data.state)
+        }, 100)
+      } else {
+        console.warn("[Frontend] Enemy turn response missing state:", data)
+        // Try to fetch state manually
+        try {
+          const stateResponse = await fetch(`/api/combat/state/${combatSessionId}`)
+          if (stateResponse.ok) {
+            const stateData = await stateResponse.json()
+            setCombatState(stateData)
+            setTimeout(() => {
+              checkTurn(stateData)
+            }, 100)
+          }
+        } catch (e) {
+          console.error("[Frontend] Failed to fetch state after enemy turn:", e)
+        }
       }
-    } catch (error) {
-      console.error("Error in enemy turn:", error)
-    } finally {
+    } catch (error: any) {
+      console.error("[Frontend] Error in enemy turn:", error)
+      // Reset flag on error too
+      enemyTurnInProgress.current = false
       setIsLoading(false)
+      
+      if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+        setNarratives(prev => [...prev, "⚠️ Enemy AI timed out. Trying to recover..."])
+        // Try to get current state to continue
+        try {
+          const stateResponse = await fetch(`/api/combat/state/${combatSessionId}`)
+          if (stateResponse.ok) {
+            const stateData = await stateResponse.json()
+            setCombatState(stateData)
+            setTimeout(() => {
+              checkTurn(stateData)
+            }, 100)
+            setNarratives(prev => [...prev, "✅ Recovered combat state. Please continue."])
+          } else {
+            setNarratives(prev => [...prev, "❌ Failed to recover. Please refresh the page."])
+          }
+        } catch (e) {
+          console.error("[Frontend] Failed to recover state after timeout:", e)
+          setNarratives(prev => [...prev, "❌ Failed to recover. Please refresh the page."])
+        }
+      } else {
+        setNarratives(prev => [...prev, `⚠️ Error: ${error.message || "Failed to process enemy turn"}`])
+        // Try to recover by fetching state
+        try {
+          const stateResponse = await fetch(`/api/combat/state/${combatSessionId}`)
+          if (stateResponse.ok) {
+            const stateData = await stateResponse.json()
+            setCombatState(stateData)
+            setTimeout(() => {
+              checkTurn(stateData)
+            }, 100)
+          }
+        } catch (e) {
+          console.error("[Frontend] Failed to recover after error:", e)
+        }
+      }
     }
   }
 
@@ -267,6 +392,7 @@ export default function CombatPage() {
     setIsPlayerTurn(false)
     setActionInput("")
     setGameOver(true)
+    gameOverRef.current = true
     
     if (winner === "players") {
       setNarratives(prev => [...prev, "🎉 Victory! 🎉 The heroes have triumphed over their foes!"])

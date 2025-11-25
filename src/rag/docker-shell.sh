@@ -7,7 +7,7 @@ set -e
 export BASE_DIR=$(pwd)
 export PERSISTENT_DIR=$(pwd)/../persistent-folder/
 export SECRETS_DIR=$(pwd)/../../secrets/
-export GCP_PROJECT="aic215" # CHANGE TO YOUR PROJECT ID
+export GCP_PROJECT="even-turbine-471117-u0" # CHANGE TO YOUR PROJECT ID
 export GOOGLE_APPLICATION_CREDENTIALS="/secrets/dnd-master.json"
 export IMAGE_NAME="dnd-rag-cli"
 

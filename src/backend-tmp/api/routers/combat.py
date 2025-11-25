@@ -181,13 +181,18 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
     Process a player action and advance combat.
     Handles both player and enemy turns automatically.
     """
+    print(f"[COMBAT] ===== Action request received =====")
+    print(f"[COMBAT] Session: {session_id}, Action: {request.action}")
+    
     if session_id not in combat_sessions:
+        print(f"[COMBAT] ERROR: Session {session_id} not found")
         raise HTTPException(status_code=404, detail="Combat session not found")
 
     engine = combat_sessions[session_id]
     parser = action_parsers[session_id]
     bot = bots[session_id]
     narrator = narrators[session_id]
+    print(f"[COMBAT] Session found, engine initialized")
 
     if engine.is_battle_over():
         state = get_combat_state(session_id, engine)
@@ -232,21 +237,34 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
         # Execute action
         raw_result = engine.process_action(action)
 
-        # Generate narrative
-        narrative = narrator.narrate(request.action, raw_result)
+        # Generate narrative (narrator.narrate is now async)
+        narrative = await narrator.narrate(request.action, raw_result)
 
     else:
         # It's an enemy turn - process enemy action (ignore player-provided action text)
-        # Use await since decide_action is now async
-        action = await bot.decide_action()
-        if not action:
-            raise HTTPException(status_code=500, detail="AI failed to decide action")
+        print(f"[COMBAT] Processing enemy turn for {actor.name}")
+        print(f"[COMBAT] Calling bot.decide_action()...")
+        try:
+            # Use await since decide_action is now async
+            action = await bot.decide_action()
+            print(f"[COMBAT] Enemy action received: {action}")
+            if not action:
+                print(f"[COMBAT] ERROR: Enemy bot returned None action")
+                raise HTTPException(status_code=500, detail="AI failed to decide action")
 
-        # Execute action
-        raw_result = engine.process_action(action)
+            # Execute action
+            print(f"[COMBAT] Executing enemy action...")
+            raw_result = engine.process_action(action)
+            print(f"[COMBAT] Action executed, result: {raw_result}")
 
-        # Generate narrative
-        narrative = narrator.narrate(raw_result, raw_result)
+            # Generate narrative (narrator.narrate is now async)
+            narrative = await narrator.narrate(raw_result, raw_result)
+            print(f"[COMBAT] Narrative generated: {narrative[:100]}...")
+        except Exception as e:
+            print(f"[COMBAT] ERROR in enemy turn processing: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     # Advance to next turn after processing action
     engine.next_turn()

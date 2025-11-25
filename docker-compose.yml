@@ -50,7 +50,7 @@ services:
     environment:
       GCP_PROJECT: ${GCP_PROJECT}
       GCP_LOCATION: us-central1
-      GOOGLE_APPLICATION_CREDENTIALS: /secrets/ml-workflow.json
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/llm-service-account.json
       DEV: "0"
     volumes:
       - ./secrets:/secrets:ro

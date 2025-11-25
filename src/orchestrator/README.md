@@ -297,7 +297,7 @@ CHROMADB_PORT=8000
 **Combat Agent**:
 ```bash
 GCP_PROJECT=your-project-id
-GOOGLE_APPLICATION_CREDENTIALS=/secrets/ml-workflow.json
+GOOGLE_APPLICATION_CREDENTIALS=/secrets/llm-service-account.json
 ```
 
 ## Running the System

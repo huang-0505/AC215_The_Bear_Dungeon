@@ -9,10 +9,10 @@ set -e
 export IMAGE_NAME="dnd-combat-simulator"
 export BASE_DIR=$(pwd)
 export SECRETS_DIR=$(pwd)/../../secrets
-export GCP_PROJECT="aic215"
+export GCP_PROJECT="even-turbine-471117-u0"
 export GCP_LOCATION="us-central1"
 export GCP_ZONE="us-central1-a"
-export GOOGLE_APPLICATION_CREDENTIALS="/secrets/ml-workflow.json"
+export GOOGLE_APPLICATION_CREDENTIALS="/secrets/llm-service-account.json"
 
 # Build the Docker image
 echo "🔨 Building Docker image: $IMAGE_NAME"

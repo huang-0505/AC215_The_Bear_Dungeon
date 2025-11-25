@@ -15,6 +15,8 @@ export async function POST(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      // Add timeout to prevent indefinite hanging (15 seconds to account for GenAI processing)
+      signal: AbortSignal.timeout(15000), // 15 second timeout
     })
 
     if (!response.ok) {

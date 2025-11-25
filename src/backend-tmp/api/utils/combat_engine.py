@@ -213,13 +213,30 @@ class CombatEngine:
         self.current_actor: Optional[Character] = None
 
     def roll_initiative(self) -> deque:
-        """Roll initiative for all combatants and return turn order."""
+        """Roll initiative for all combatants and return turn order.
+        Players always go first as a workaround for enemy turn freezing issues.
+        """
         chars = self.state.get_all()
-        initiative_scores = [
-            (c, random.randint(1, 20) + c.attributes.get("DEX", 0)) for c in chars
+        
+        # Separate players and enemies
+        players = [c for c in chars if c.role == "player"]
+        enemies = [c for c in chars if c.role == "enemy"]
+        
+        # Roll initiative within each group
+        player_scores = [
+            (c, random.randint(1, 20) + c.attributes.get("DEX", 0)) for c in players
         ]
-        ordered = sorted(initiative_scores, key=lambda x: x[1], reverse=True)
-        return deque([c for c, _ in ordered])
+        enemy_scores = [
+            (c, random.randint(1, 20) + c.attributes.get("DEX", 0)) for c in enemies
+        ]
+        
+        # Sort each group by initiative
+        ordered_players = sorted(player_scores, key=lambda x: x[1], reverse=True)
+        ordered_enemies = sorted(enemy_scores, key=lambda x: x[1], reverse=True)
+        
+        # Players always go first, then enemies
+        turn_order = [c for c, _ in ordered_players] + [c for c, _ in ordered_enemies]
+        return deque(turn_order)
 
     def next_turn(self) -> Character:
         """Advance to the next combatant's turn."""
