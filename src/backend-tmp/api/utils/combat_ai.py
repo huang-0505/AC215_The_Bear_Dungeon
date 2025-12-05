@@ -87,9 +87,10 @@ class ActionParserBot:
     def parse(self, actor: Character, action_text: str) -> Optional[dict]:
         """
         Parse bot-generated action description into action data.
+        Handles both enemies (targeting players/teammates) and teammates (targeting enemies).
 
         Args:
-            actor: The acting enemy character
+            actor: The acting character (enemy or teammate)
             action_text: LLM-generated action description
 
         Returns:
@@ -103,25 +104,72 @@ class ActionParserBot:
 
         action_type = ACTION_REGISTRY[action_id]
 
-        # Find closest matching target among alive players
-        alive_players = self.engine.state.get_alive(role="player")
-        if not alive_players:
+        # Determine valid targets based on actor role
+        if actor.role == "teammate":
+            # Teammates target enemies
+            valid_targets = self.engine.state.get_alive(role="enemy")
+            target_role = "enemy"
+        else:
+            # Enemies target players and teammates
+            valid_targets = self.engine.state.get_alive(role="player") + self.engine.state.get_alive(role="teammate")
+            target_role = "player"  # For ID lookup, but we'll search both roles
+
+        if not valid_targets:
             return None
 
+        # Try to find target using semantic search
         try:
             ally_ids = retrieve_top_k(action_text, self.ally_db_path, k=100)
-            # Match retrieved IDs with alive players
             target = None
+            # Match retrieved IDs with valid targets
             for ally_id in ally_ids:
-                if any(p.id == ally_id for p in alive_players):
-                    target = self.engine.state.get_by_id(ally_id, role="player")
-                    break
+                # Check players first
+                if target_role == "player":
+                    if any(p.id == ally_id for p in self.engine.state.get_alive(role="player")):
+                        target = self.engine.state.get_by_id(ally_id, role="player")
+                        break
+                    # Also check teammates
+                    if any(t.id == ally_id for t in self.engine.state.get_alive(role="teammate")):
+                        target = self.engine.state.get_by_id(ally_id, role="teammate")
+                        break
+                else:
+                    # For enemies, check enemy list
+                    if any(e.id == ally_id for e in self.engine.state.get_alive(role="enemy")):
+                        target = self.engine.state.get_by_id(ally_id, role="enemy")
+                        break
 
+            # Fallback: try name matching if semantic search didn't work
             if not target:
-                target = alive_players[0]  # Default to first alive player
+                action_lower = action_text.lower()
+                for t in valid_targets:
+                    if t.name.lower() in action_lower:
+                        target = t
+                        break
+
+            # Final fallback: use tactical or random target selection instead of always first
+            if not target:
+                # Use tactical selection: prioritize low HP and lower AC targets
+                if len(valid_targets) == 1:
+                    target = valid_targets[0]
+                else:
+                    # Score targets: lower HP% and lower AC = better target
+                    scored = []
+                    for t in valid_targets:
+                        hp_percent = t.hp / t.max_hp if t.max_hp > 0 else 1.0
+                        ac_factor = (20 - t.ac) / 10.0  # Lower AC = easier to hit
+                        score = (hp_percent * 0.7) - (ac_factor * 0.3) + (random.random() * 0.1)
+                        scored.append((t, score))
+                    # Sort by score (lower = better), pick from top 2-3 for variety
+                    scored.sort(key=lambda x: x[1])
+                    top_n = min(3, len(scored))
+                    target = random.choice(scored[:top_n])[0]
         except:
-            # Fallback to first alive player if database not available
-            target = alive_players[0]
+            # Fallback to tactical/random target if database not available
+            if len(valid_targets) == 1:
+                target = valid_targets[0]
+            else:
+                # Use random selection for variety
+                target = random.choice(valid_targets)
 
         return {
             "id": action_id,
@@ -185,10 +233,54 @@ class DnDBot:
             traceback.print_exc()
             return None
 
+    def _select_tactical_target(self, targets: list, actor: Character) -> Optional[Character]:
+        """
+        Select a tactical target using smart heuristics.
+        Prioritizes: low HP (finish off wounded), lower AC (easier to hit), with some randomness.
+        
+        Args:
+            targets: List of potential target characters
+            actor: The acting character
+            
+        Returns:
+            Selected target character or None if no targets
+        """
+        if not targets:
+            return None
+        
+        if len(targets) == 1:
+            return targets[0]
+        
+        # Score each target based on tactical factors
+        scored_targets = []
+        for t in targets:
+            # Calculate HP percentage (lower is better - finish off wounded enemies)
+            hp_percent = t.hp / t.max_hp if t.max_hp > 0 else 1.0
+            
+            # AC factor (lower AC is easier to hit, so better target)
+            # Normalize AC to 0-1 scale (assuming AC range 10-20, lower is better)
+            ac_factor = (20 - t.ac) / 10.0  # Higher value = easier to hit
+            
+            # Tactical score: prioritize low HP (70% weight) and lower AC (30% weight)
+            # Add small random factor (10%) to avoid being too predictable
+            tactical_score = (hp_percent * 0.7) - (ac_factor * 0.3) + (random.random() * 0.1)
+            
+            scored_targets.append((t, tactical_score, hp_percent, t.ac))
+        
+        # Sort by tactical score (lower score = better target)
+        scored_targets.sort(key=lambda x: x[1])
+        
+        # Pick from top 2-3 candidates to add some variety
+        top_n = min(3, len(scored_targets))
+        selected = random.choice(scored_targets[:top_n])[0]
+        
+        print(f"[DnDBot] Tactical target selection: {selected.name} (HP: {selected.hp}/{selected.max_hp}, AC: {selected.ac})")
+        return selected
+
     async def decide_action(self) -> Optional[dict]:
         """
         Generate enemy action using LLM tactical reasoning.
-        Falls back to simple attack if LLM fails or times out.
+        Falls back to tactical attack if LLM fails or times out.
         Uses async with timeout to prevent freezing.
 
         Returns:
@@ -200,32 +292,100 @@ class DnDBot:
             print(f"[DnDBot] ERROR: No current actor")
             return None
 
-        alive_players = self.engine.state.get_alive(role="player")
-        if not alive_players:
-            print(f"[DnDBot] ERROR: No alive players")
+        # Determine targets based on actor role
+        if actor.role == "teammate":
+            # Teammates target enemies
+            targets = self.engine.state.get_alive(role="enemy")
+            allies = self.engine.state.get_alive(role="player") + self.engine.state.get_alive(role="teammate")
+            allies = [a for a in allies if a != actor]  # Exclude self
+            enemies = self.engine.state.get_alive(role="enemy")
+            bot_type = "teammate"
+        else:
+            # Enemies target players/teammates
+            targets = self.engine.state.get_alive(role="player") + self.engine.state.get_alive(role="teammate")
+            allies = self.engine.state.get_alive(role="enemy")
+            allies = [a for a in allies if a != actor]  # Exclude self
+            enemies = self.engine.state.get_alive(role="player") + self.engine.state.get_alive(role="teammate")
+            bot_type = "enemy"
+
+        if not targets:
+            print(f"[DnDBot] ERROR: No alive targets for {actor.role}")
             return None
         
-        # Default fallback target
-        target = random.choice(alive_players)
-        print(f"[DnDBot] Selected fallback target: {target.name}")
+        # Use tactical target selection instead of random
+        target = self._select_tactical_target(targets, actor)
+        if not target:
+            print(f"[DnDBot] ERROR: Failed to select tactical target")
+            return None
+        print(f"[DnDBot] Selected tactical target: {target.name} (actor role: {actor.role})")
         
         # Try to use LLM for more interesting actions (only if client is available)
         if self.use_llm and self.client:
             try:
-                # Construct tactical analysis prompt
-                analysis_prompt = f"""
+                # Build detailed target information for tactical decision-making
+                target_info = []
+                for t in targets:
+                    hp_percent = int((t.hp / t.max_hp) * 100) if t.max_hp > 0 else 100
+                    status = "CRITICAL" if hp_percent < 25 else "WOUNDED" if hp_percent < 50 else "HEALTHY"
+                    target_info.append(f"  - {t.name}: HP {t.hp}/{t.max_hp} ({hp_percent}%, {status}), AC {t.ac}")
+                targets_str = "\n".join(target_info)
+                
+                # Build ally information
+                ally_info = []
+                for a in allies:
+                    hp_percent = int((a.hp / a.max_hp) * 100) if a.max_hp > 0 else 100
+                    ally_info.append(f"  - {a.name}: HP {a.hp}/{a.max_hp} ({hp_percent}%), AC {a.ac}")
+                allies_str = "\n".join(ally_info) if ally_info else "  (none)"
+                
+                # Construct tactical analysis prompt with detailed combat state
+                if actor.role == "teammate":
+                    analysis_prompt = f"""
+You are a DnD teammate bot controlling {actor.name}, fighting alongside your party.
+
+COMBAT STATE:
+- You: {actor.name} (HP: {actor.hp}/{actor.max_hp}, AC: {actor.ac})
+
+- Your Allies:
+{allies_str}
+
+- Enemy Targets (choose one to attack):
+{targets_str}
+
+TACTICAL GUIDANCE:
+- Prioritize finishing off wounded enemies (low HP) to reduce enemy numbers
+- Consider targeting enemies with lower AC (easier to hit)
+- Focus fire on one enemy if multiple are wounded
+- Protect your allies if they're in critical condition
+
+Choose one action to help your party defeat the enemies. Describe who you attack (or target) and how you perform it.
+Stay consistent with D&D combat style and the character's role.
+Keep your response concise (1-2 sentences).
+Example: "I attack {target.name} with my weapon" or "I focus my attack on the wounded {target.name}"
+"""
+                else:
+                    analysis_prompt = f"""
 You are a DnD enemy bot controlling {actor.name}.
 
-Current State:
-- You are: {actor.name} (HP: {actor.hp}/{actor.max_hp}, AC: {actor.ac})
-- Your allies: {[e.name for e in self.engine.state.enemies if e.alive]}
-- Your enemies: {[p.name for p in self.engine.state.players if p.alive]}
+COMBAT STATE:
+- You: {actor.name} (HP: {actor.hp}/{actor.max_hp}, AC: {actor.ac})
+
+- Your Allies:
+{allies_str}
+
+- Enemy Targets (choose one to attack):
+{targets_str}
+
+TACTICAL GUIDANCE:
+- Prioritize finishing off wounded enemies (low HP) to eliminate threats quickly
+- Consider targeting enemies with lower AC (easier to hit)
+- Focus fire on one enemy if multiple are wounded
+- Target spellcasters or support characters if they're vulnerable
 
 Choose one hostile action and describe it in natural language.
 Describe who you attack (or target) and how you perform it.
 Stay consistent with D&D combat style and the character's role.
 Keep your response concise (1-2 sentences).
-Example: "I attack {target.name} with my weapon"
+Example: "I attack {target.name} with my weapon" or "I focus my attack on the wounded {target.name}"
 """
 
                 # Run GenAI call in thread pool with 5 second timeout

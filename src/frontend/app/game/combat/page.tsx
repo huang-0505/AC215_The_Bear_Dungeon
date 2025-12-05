@@ -184,15 +184,18 @@ export default function CombatPage() {
     if (!state || !state.current_actor) return
 
     const currentActor = state.current_actor
-    const isPlayer = state.players.some(p => p.name === currentActor && p.alive)
+    const currentPlayer = state.players.find(p => p.name === currentActor && p.alive)
     const isEnemy = state.enemies.some(e => e.name === currentActor && e.alive)
 
-    if (isPlayer) {
+    // Player controls all characters (main player + teammates)
+    if (currentPlayer) {
+      // It's a player or teammate turn - player controls it
       setIsPlayerTurn(true)
-      enemyTurnInProgress.current = false // Reset flag when player turn
+      enemyTurnInProgress.current = false // Reset flag when player/teammate turn
     } else if (isEnemy) {
+      // Enemy turn - auto-trigger
       setIsPlayerTurn(false)
-      // Only trigger enemy turn if not already in progress and not loading
+      // Only trigger auto turn if not already in progress and not loading
       // Add a small delay to ensure previous turn processing is complete
       if (!enemyTurnInProgress.current && !isLoading) {
         console.log("[Frontend] Detected enemy turn, will trigger in 1.5s:", currentActor)
@@ -202,7 +205,7 @@ export default function CombatPage() {
             console.log("[Frontend] Timeout fired, calling triggerEnemyTurn()")
             triggerEnemyTurn()
           } else {
-            console.log("[Frontend] Conditions changed, skipping enemy turn trigger:", {
+            console.log("[Frontend] Conditions changed, skipping auto turn trigger:", {
               enemyTurnInProgress: enemyTurnInProgress.current,
               isLoading,
               combatSessionId: !!combatSessionId,
@@ -397,19 +400,129 @@ export default function CombatPage() {
     if (winner === "players") {
       setNarratives(prev => [...prev, "🎉 Victory! 🎉 The heroes have triumphed over their foes!"])
       
-      // Note: When we return to game page, the orchestrator will detect combat end
-      // on the next action. The combat agent already knows combat ended, so when
-      // user returns and takes an action, orchestrator will call combat agent,
-      // detect battle_over, and transition to narration automatically.
+      // CRITICAL: Explicitly preserve game_session_id before redirecting
+      const gameSessionId = localStorage.getItem("game_session_id")
+      if (!gameSessionId) {
+        console.error("[Combat] ERROR: No game_session_id found in localStorage! Cannot notify orchestrator.")
+        // Still try to redirect, but this is a problem
+        setTimeout(() => {
+          window.location.replace("/game")
+        }, 3000)
+        return
+      }
       
-      // Auto-return to game after 3 seconds
+      // Ensure it's preserved (in case localStorage was cleared)
+      localStorage.setItem("game_session_id", gameSessionId)
+      console.log("[Combat] Preserving game_session_id for return:", gameSessionId)
+      
+      // Also preserve messages if they exist
+      const savedMessages = localStorage.getItem("game_messages")
+      if (savedMessages) {
+        console.log("[Combat] Preserving game messages for return")
+      }
+      
+      // Set flag to indicate we're returning from combat
+      localStorage.setItem("returning_from_combat", "true")
+      
+      // ✅ CRITICAL: Notify orchestrator that combat ended
+      // This triggers the combat->narration transition and generates post-combat narration
+      try {
+        console.log("[Combat] Notifying orchestrator that combat ended...")
+        const notifyResponse = await fetch("/api/game/action", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            session_id: gameSessionId,
+            text: "combat ended" // Any text - orchestrator will detect battle_over from combat state
+          }),
+          signal: AbortSignal.timeout(30000) // 30 second timeout for orchestrator processing
+        })
+        
+        if (!notifyResponse.ok) {
+          console.warn("[Combat] Failed to notify orchestrator:", notifyResponse.status)
+          // Continue anyway - the game page will handle restoration
+        } else {
+          const notifyData = await notifyResponse.json()
+          console.log("[Combat] Orchestrator notified, transition:", notifyData.transition)
+          
+          // Update saved messages with post-combat narration if provided
+          if (notifyData.response && savedMessages) {
+            try {
+              const parsedMessages = JSON.parse(savedMessages)
+              const postCombatMessage = {
+                author: "ai",
+                text: notifyData.response,
+                timestamp: Date.now(),
+                choices: Array.isArray(notifyData.choices) ? notifyData.choices : undefined,
+                combat_available: notifyData.combat_available === true,
+                narrationRound: typeof notifyData.narration_round === 'number' ? notifyData.narration_round : undefined,
+                combatCount: typeof notifyData.combat_count === 'number' ? notifyData.combat_count : undefined,
+                maxCombats: typeof notifyData.max_combats === 'number' ? notifyData.max_combats : undefined,
+              }
+              
+              // Check if this message already exists (avoid duplicates)
+              const lastMessage = parsedMessages[parsedMessages.length - 1]
+              const messageExists = lastMessage && 
+                lastMessage.author === "ai" && 
+                lastMessage.text === notifyData.response
+              
+              if (!messageExists) {
+                const updatedMessages = [...parsedMessages, postCombatMessage]
+                localStorage.setItem("game_messages", JSON.stringify(updatedMessages))
+                console.log("[Combat] Updated game messages with post-combat narration")
+              }
+            } catch (e) {
+              console.warn("[Combat] Failed to update messages:", e)
+            }
+          }
+        }
+      } catch (error: any) {
+        console.error("[Combat] Error notifying orchestrator:", error)
+        // Continue anyway - the game page will handle restoration when it loads
+      }
+      
+      // Auto-return to game after 3 seconds (give orchestrator time to process)
       setTimeout(() => {
-        localStorage.removeItem("combat_session_id")
-        window.location.href = "/game" // Use window.location instead of router
+        try {
+          // Double-check game_session_id is still there before redirecting
+          const finalGameSessionId = localStorage.getItem("game_session_id")
+          if (!finalGameSessionId) {
+            console.error("[Combat] ERROR: game_session_id lost before redirect! Attempting recovery...")
+            // Try to recover from URL or other sources if possible
+          }
+          
+          localStorage.removeItem("combat_session_id")
+          // Use replace to avoid adding to history, but preserve session
+          console.log("[Combat] Redirecting to game page with session:", finalGameSessionId)
+          window.location.replace("/game")
+        } catch (e) {
+          console.error("[Combat] Error during redirect:", e)
+          // Fallback: try redirect anyway
+          window.location.replace("/game")
+        }
       }, 3000)
     } else {
       setNarratives(prev => [...prev, "💀 Defeat 💀 The enemies have prevailed..."])
       // Game over - players died
+      // Still notify orchestrator so it can handle the defeat state
+      const gameSessionId = localStorage.getItem("game_session_id")
+      if (gameSessionId) {
+        try {
+          await fetch("/api/game/action", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: gameSessionId,
+              text: "combat ended"
+            }),
+            signal: AbortSignal.timeout(30000)
+          })
+        } catch (e) {
+          console.error("[Combat] Error notifying orchestrator of defeat:", e)
+        }
+      }
       // Stay on page, show game over message
       // The orchestrator will handle game over state when user returns
     }

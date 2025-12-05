@@ -130,6 +130,9 @@ export default function GameInterface() {
   const [isAiThinking, setIsAiThinking] = useState(false)
   const [showUpload, setShowUpload] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [currentRound, setCurrentRound] = useState<number | undefined>(undefined)
+  const [currentCombatCount, setCurrentCombatCount] = useState<number | undefined>(undefined)
+  const [currentMaxCombats, setCurrentMaxCombats] = useState<number | undefined>(undefined)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -141,90 +144,291 @@ export default function GameInterface() {
     setCharacterClass(selectedClass)
     setSelectedCampaign(campaign)
 
-    // Check if we have an existing session and messages
+    // Check if we're returning from combat (not starting a fresh game)
+    const returningFromCombat = safeLocalStorage.getItem("returning_from_combat") === "true"
     const savedSessionId = safeLocalStorage.getItem("game_session_id")
     const savedMessages = safeLocalStorage.getItem("game_messages")
     
-    // Always start fresh - don't restore old sessions to avoid 404 errors
-    // Clear any old session data
-    safeLocalStorage.removeItem("game_session_id")
-    safeLocalStorage.removeItem("game_messages")
-    safeLocalStorage.removeItem("combat_session_id")
-
-    // Start new game session with orchestrator
-    async function startGameSession() {
-      try {
-        const response = await fetch('/api/game/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            campaign_id: campaign,
-            character_class: selectedClass,
-            character_name: selectedClass, // Use class name as default
-            max_combats: 5,           // Game ends after 5 combats (default: 5)
-            combat_rounds: [3, 5, 10, 15]  // Combat available at these rounds (default: [3, 5, 10, 15])
-          }),
-        }).catch((fetchError) => {
-          console.error('Fetch error:', fetchError)
-          throw new Error(`Network error: ${fetchError.message}`)
-        })
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => 'Unknown error')
-        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`)
-      }
-        
-        const data = await response.json().catch((parseError) => {
-          console.error('JSON parse error:', parseError)
-          throw new Error('Invalid JSON response from server')
-        })
-        
-        if (!data || !data.session_id) {
-          throw new Error("Invalid response from server: missing session_id")
-        }
-        
-        setSessionId(data.session_id)
-        safeLocalStorage.setItem("game_session_id", data.session_id)
-
-        // Add initial narrative as first message
-        const initialMessage: Message = {
-          author: "ai",
-          text: data.response || data.message || "Welcome to the adventure!",
-          timestamp: Date.now(),
-          choices: Array.isArray(data.choices) ? data.choices : undefined,
-          combat_available: data.combat_available === true,
-          narrationRound: typeof data.narration_round === 'number' ? data.narration_round : undefined,
-          combatCount: typeof data.combat_count === 'number' ? data.combat_count : undefined,
-          maxCombats: typeof data.max_combats === 'number' ? data.max_combats : undefined,
-        }
-        setMessages([initialMessage])
-        safeLocalStorage.setItem("game_messages", JSON.stringify([initialMessage]))
-      } catch (error: any) {
-        console.error('Failed to start game session:', error)
-        // Fallback to local opening
+    // Only restore session if we're returning from combat
+    // Otherwise, clear old session data and start fresh
+    if (!returningFromCombat) {
+      console.log("Starting fresh game - clearing old session data")
+      safeLocalStorage.removeItem("game_session_id")
+      safeLocalStorage.removeItem("game_messages")
+      safeLocalStorage.removeItem("combat_session_id")
+    }
+    
+    // Async function to restore session (only called if returning from combat)
+    async function restoreSession() {
+      if (returningFromCombat && savedSessionId && savedMessages) {
+        console.log("Returning from combat, attempting to restore session...")
+        setSessionId(savedSessionId)
         try {
-          const characterOpening = getCharacterOpening(selectedClass, campaign)
-          const errorMessage = error?.message || 'Unknown error'
+          const parsedMessages = JSON.parse(savedMessages)
+          setMessages(parsedMessages)
+          
+          // Verify session is still valid by checking game state
+          // Add timeout and better error handling
+          let stateResponse: Response | null = null
+          try {
+            stateResponse = await fetch(`/api/orchestrator/game/state/${savedSessionId}`, {
+              signal: AbortSignal.timeout(5000) // 5 second timeout
+            })
+          } catch (fetchError: any) {
+            console.warn("Session validation failed (network/timeout), but continuing with restoration:", fetchError)
+            // Don't fail completely - try to restore anyway
+            // The session might still be valid, just the API call failed
+            stateResponse = null
+          }
+          
+          if (stateResponse && stateResponse.ok) {
+            const stateData = await stateResponse.json()
+            const currentState = stateData.current_state
+            
+            // ✅ CRITICAL: Get round/combat count from tree data, not just node metadata
+            const treeData = stateData.full_tree || {}
+            const narrationRound = typeof treeData.narration_round === 'number' ? treeData.narration_round : 
+                                  (currentState?.metadata?.narration_round || 0)
+            const combatCount = typeof treeData.combat_count === 'number' ? treeData.combat_count : 
+                               (currentState?.metadata?.combat_count || 0)
+            const maxCombats = typeof treeData.max_combats === 'number' ? treeData.max_combats : 
+                              (currentState?.metadata?.max_combats || 5)
+            
+            console.log("Session restored successfully, current state:", currentState?.state_type, 
+                       `Round: ${narrationRound}, Combats: ${combatCount}/${maxCombats}`)
+            
+            // ✅ Update all existing messages with correct round/combat count info
+            // This ensures the UI shows the correct counts
+            const updatedMessagesWithCounts = parsedMessages.map((msg: Message) => ({
+              ...msg,
+              narrationRound: msg.narrationRound !== undefined ? msg.narrationRound : narrationRound,
+              combatCount: msg.combatCount !== undefined ? msg.combatCount : combatCount,
+              maxCombats: msg.maxCombats !== undefined ? msg.maxCombats : maxCombats,
+            }))
+            setMessages(updatedMessagesWithCounts)
+            safeLocalStorage.setItem("game_messages", JSON.stringify(updatedMessagesWithCounts))
+            
+            // ✅ Update current round/combat state for UI display
+            setCurrentRound(narrationRound)
+            setCurrentCombatCount(combatCount)
+            setCurrentMaxCombats(maxCombats)
+            
+            // Check if we're in narration state after combat (combat just ended)
+            // This works for EVERY combat, not just the first one
+            if (currentState && currentState.state_type === "narration") {
+              // Check if this is a post-combat narration node
+              const isPostCombat = currentState.metadata?.combat_outcome || 
+                                   currentState.metadata?.previous_combat_id ||
+                                   // Also check if the last message was about combat
+                                   (parsedMessages.length > 0 && 
+                                    parsedMessages[parsedMessages.length - 1]?.text?.includes("⚔️"))
+              
+              if (isPostCombat) {
+                // This is a post-combat narration node - combat just ended
+                const combatOutcome = currentState.metadata?.combat_outcome
+                const agentResponse = currentState.agent_response || 
+                  currentState.narrative_text ||
+                  (combatOutcome === "players" 
+                    ? "🎉 Victory! The battle has been won. The adventure continues..."
+                    : "The battle has ended. The adventure continues...")
+                
+                // Extract choices from metadata or state
+                const choices = currentState.metadata?.choices || 
+                               currentState.metadata?.story_choices || 
+                               []
+                
+                const postCombatMessage: Message = {
+                  author: "ai",
+                  text: agentResponse,
+                  timestamp: Date.now(),
+                  choices: Array.isArray(choices) && choices.length > 0 ? choices : undefined,
+                  combat_available: currentState.metadata?.combat_available !== false,
+                  narrationRound: narrationRound,
+                  combatCount: combatCount,
+                  maxCombats: maxCombats,
+                }
+                
+                // Check if this message is already in the messages list
+                // Compare by text content to avoid duplicates
+                const lastMessage = updatedMessagesWithCounts[updatedMessagesWithCounts.length - 1]
+                const messageExists = lastMessage && 
+                  lastMessage.author === "ai" && 
+                  (lastMessage.text === agentResponse || 
+                   lastMessage.text.includes(agentResponse.substring(0, 50)) ||
+                   (agentResponse.length > 50 && lastMessage.text.includes(agentResponse.substring(0, 50))))
+                
+                if (!messageExists) {
+                  // Add the post-combat narration to messages
+                  const finalMessages = [...updatedMessagesWithCounts, postCombatMessage]
+                  setMessages(finalMessages)
+                  safeLocalStorage.setItem("game_messages", JSON.stringify(finalMessages))
+                  console.log("✅ Added post-combat narration to messages (combat #" + combatCount + "):", agentResponse.substring(0, 50))
+                } else {
+                  console.log("Post-combat narration already in messages, skipping duplicate")
+                }
+              } else {
+                // Regular narration state - messages already restored with correct counts
+                console.log("In narration state, messages restored with round/combat counts")
+              }
+            } else if (currentState && currentState.state_type === "combat") {
+              // Still in combat state - this shouldn't happen if orchestrator was notified
+              // But handle it gracefully
+              console.warn("Still in combat state after returning from combat - orchestrator may not have processed yet")
+              // Keep messages as-is, user can continue
+            }
+            
+            // Clear the returning flag and combat session ID (works for every combat)
+            safeLocalStorage.removeItem("returning_from_combat")
+            safeLocalStorage.removeItem("combat_session_id")
+            console.log("✅ Session restored successfully after combat - Round:", narrationRound, "Combats:", combatCount)
+            return true // Session restored successfully
+          } else if (stateResponse === null) {
+            // Network error but we'll try to continue anyway
+            console.log("Session validation failed (network error), but restoring messages anyway")
+            // Messages already restored above, just clear flags
+            safeLocalStorage.removeItem("returning_from_combat")
+            safeLocalStorage.removeItem("combat_session_id")
+            return true // Restore anyway - user can continue
+          } else {
+            // State check failed (404 or other error)
+            // But we should still try to restore messages if they exist
+            // The session might still be valid, just the API call failed
+            console.warn("Session state check failed, but attempting to restore messages anyway")
+            if (parsedMessages && parsedMessages.length > 0) {
+              // Restore messages - user can try to continue
+              setMessages(parsedMessages)
+              safeLocalStorage.setItem("game_messages", JSON.stringify(parsedMessages))
+              safeLocalStorage.removeItem("returning_from_combat")
+              safeLocalStorage.removeItem("combat_session_id")
+              console.log("✅ Restored messages despite state check failure - user can try to continue")
+              return true // Partial restoration - better than nothing
+            } else {
+              // No messages to restore, session is truly invalid
+              console.log("Session no longer valid and no messages to restore, starting new game")
+              safeLocalStorage.removeItem("game_session_id")
+              safeLocalStorage.removeItem("game_messages")
+              safeLocalStorage.removeItem("returning_from_combat")
+              return false
+            }
+          }
+        } catch (e) {
+          console.error("Error restoring session:", e)
+          // Try to preserve messages even if there's an error
+          // User might still be able to continue
+          try {
+            const parsedMessages = JSON.parse(savedMessages)
+            setMessages(parsedMessages)
+            console.log("Restored messages despite error, user can try to continue")
+            safeLocalStorage.removeItem("returning_from_combat")
+            safeLocalStorage.removeItem("combat_session_id")
+            return true // Partial restoration
+          } catch (parseError) {
+            console.error("Failed to parse messages:", parseError)
+          }
+          // Clear invalid data and fall through to start new game
+          safeLocalStorage.removeItem("game_session_id")
+          safeLocalStorage.removeItem("game_messages")
+          safeLocalStorage.removeItem("returning_from_combat")
+          return false
+        }
+      }
+      return false
+    }
+    
+    // Try to restore session first, then start new game if needed
+    restoreSession().then((restored) => {
+      if (restored) {
+        return // Session restored, exit early
+      }
+      
+      // Clear combat session ID and returning flag if they exist (cleanup)
+      safeLocalStorage.removeItem("combat_session_id")
+      safeLocalStorage.removeItem("returning_from_combat")
+
+      // Start new game session with orchestrator
+      async function startGameSession() {
+        try {
+          const response = await fetch('/api/game/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              campaign_id: campaign,
+              character_class: selectedClass,
+              character_name: selectedClass, // Use class name as default
+              max_combats: 5,           // Game ends after 5 combats (default: 5)
+              combat_rounds: [3, 5, 10, 15]  // Combat available at these rounds (default: [3, 5, 10, 15])
+            }),
+          }).catch((fetchError) => {
+            console.error('Fetch error:', fetchError)
+            throw new Error(`Network error: ${fetchError.message}`)
+          })
+
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => 'Unknown error')
+            throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`)
+          }
+            
+          const data = await response.json().catch((parseError) => {
+            console.error('JSON parse error:', parseError)
+            throw new Error('Invalid JSON response from server')
+          })
+          
+          if (!data || !data.session_id) {
+            throw new Error("Invalid response from server: missing session_id")
+          }
+          
+          setSessionId(data.session_id)
+          safeLocalStorage.setItem("game_session_id", data.session_id)
+
+          // Add initial narrative as first message
+          const narrationRound = typeof data.narration_round === 'number' ? data.narration_round : 0
+          const combatCount = typeof data.combat_count === 'number' ? data.combat_count : 0
+          const maxCombats = typeof data.max_combats === 'number' ? data.max_combats : 5
+          
+          // ✅ Set current state
+          setCurrentRound(narrationRound)
+          setCurrentCombatCount(combatCount)
+          setCurrentMaxCombats(maxCombats)
+          
           const initialMessage: Message = {
             author: "ai",
-            text: `${characterOpening}\n\n⚠️ Failed to connect to game server - using offline mode.\nError: ${errorMessage}`,
+            text: data.response || data.message || "Welcome to the adventure!",
             timestamp: Date.now(),
+            choices: Array.isArray(data.choices) ? data.choices : undefined,
+            combat_available: data.combat_available === true,
+            narrationRound: narrationRound,
+            combatCount: combatCount,
+            maxCombats: maxCombats,
           }
           setMessages([initialMessage])
           safeLocalStorage.setItem("game_messages", JSON.stringify([initialMessage]))
-        } catch (fallbackError) {
-          console.error('Error in fallback:', fallbackError)
-          // Last resort - just show a simple message
-          setMessages([{
-            author: "ai",
-            text: "⚠️ An error occurred while starting the game. Please refresh the page.",
-            timestamp: Date.now(),
-          }])
+        } catch (error: any) {
+          console.error('Failed to start game session:', error)
+          // Fallback to local opening
+          try {
+            const characterOpening = getCharacterOpening(selectedClass, campaign)
+            const errorMessage = error?.message || 'Unknown error'
+            const initialMessage: Message = {
+              author: "ai",
+              text: `${characterOpening}\n\n⚠️ Failed to connect to game server - using offline mode.\nError: ${errorMessage}`,
+              timestamp: Date.now(),
+            }
+            setMessages([initialMessage])
+            safeLocalStorage.setItem("game_messages", JSON.stringify([initialMessage]))
+          } catch (fallbackError) {
+            console.error('Error in fallback:', fallbackError)
+            // Last resort - just show a simple message
+            setMessages([{
+              author: "ai",
+              text: "⚠️ An error occurred while starting the game. Please refresh the page.",
+              timestamp: Date.now(),
+            }])
+          }
         }
       }
-    }
 
-    startGameSession()
+      startGameSession()
+    })
   }, [])
 
   const scrollToBottom = () => {
@@ -452,6 +656,16 @@ export default function GameInterface() {
         responseText = `⚠️  **Rule Check:** ${data.validation.explanation || "Invalid action"}\n\n${responseText}`
       }
 
+      // ✅ Get round/combat counts from response, fallback to current state
+      const narrationRound = typeof data.narration_round === 'number' ? data.narration_round : currentRound
+      const combatCount = typeof data.combat_count === 'number' ? data.combat_count : currentCombatCount
+      const maxCombats = typeof data.max_combats === 'number' ? data.max_combats : currentMaxCombats
+      
+      // ✅ Update current state
+      if (narrationRound !== undefined) setCurrentRound(narrationRound)
+      if (combatCount !== undefined) setCurrentCombatCount(combatCount)
+      if (maxCombats !== undefined) setCurrentMaxCombats(maxCombats)
+
       const aiMessage: Message = {
         author: "ai",
         text: responseText,
@@ -460,9 +674,9 @@ export default function GameInterface() {
         combat_available: data.combat_available === true,
         isEnding: data.is_ending === true,
         endingType: typeof data.ending_type === 'string' ? data.ending_type : undefined,
-        narrationRound: typeof data.narration_round === 'number' ? data.narration_round : undefined,
-        combatCount: typeof data.combat_count === 'number' ? data.combat_count : undefined,
-        maxCombats: typeof data.max_combats === 'number' ? data.max_combats : undefined,
+        narrationRound: narrationRound,
+        combatCount: combatCount,
+        maxCombats: maxCombats,
       }
 
       setMessages((prev) => {
@@ -595,14 +809,16 @@ export default function GameInterface() {
           <div key={index} className="animate-in fade-in duration-300">
             {message.author === "ai" ? (
               <div className="space-y-3">
-                {/* Round and Combat Info */}
-                {(message.narrationRound !== undefined || message.combatCount !== undefined) && (
+                {/* Round and Combat Info - Show from message or current state */}
+                {((message.narrationRound !== undefined || currentRound !== undefined) || 
+                  (message.combatCount !== undefined || currentCombatCount !== undefined)) && (
                   <div className="ml-8 flex gap-4 text-xs text-gray-500 font-mono">
-                    {message.narrationRound !== undefined && (
-                      <span>Round: {message.narrationRound}</span>
+                    {(message.narrationRound !== undefined || currentRound !== undefined) && (
+                      <span>Round: {message.narrationRound !== undefined ? message.narrationRound : currentRound}</span>
                     )}
-                    {message.combatCount !== undefined && message.maxCombats !== undefined && (
-                      <span>Combats: {message.combatCount}/{message.maxCombats}</span>
+                    {(message.combatCount !== undefined || currentCombatCount !== undefined) && 
+                     (message.maxCombats !== undefined || currentMaxCombats !== undefined) && (
+                      <span>Combats: {(message.combatCount !== undefined ? message.combatCount : currentCombatCount) || 0}/{(message.maxCombats !== undefined ? message.maxCombats : currentMaxCombats) || 5}</span>
                     )}
                   </div>
                 )}

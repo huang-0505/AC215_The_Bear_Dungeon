@@ -68,9 +68,18 @@ def create_default_players() -> List[Character]:
 def create_default_enemies() -> List[Character]:
     """Create default enemy group."""
     return [
-        Character("Goblin", 0, 12, 13, {"DEX": 3}, attack_bonus=3, damage=6, role="enemy"),
-        Character("Troll", 3, 16, 13, {"STR": 4, "DEX": 2}, attack_bonus=5, damage=8, role="enemy"),
-        Character("Dragon", 4, 20, 20, {"STR": 6, "DEX": 6, "INT": 6}, attack_bonus=8, damage=12, role="enemy")
+        Character("Goblin", 0, 2, 1, {"DEX": 3}, attack_bonus=3, damage=6, role="enemy"),
+        Character("Troll", 3, 6, 1, {"STR": 4, "DEX": 2}, attack_bonus=5, damage=8, role="enemy"),
+        Character("Dragon", 4, 2, 2, {"STR": 6, "DEX": 6, "INT": 6}, attack_bonus=8, damage=12, role="enemy")
+    ]
+
+
+def create_default_teammates() -> List[Character]:
+    """Create 3 AI-controlled teammates for solo play."""
+    return [
+        Character("Aria", 0, 18, 16, {"STR": 3, "DEX": 4, "INT": 2}, attack_bonus=6, damage=10, role="teammate"),
+        Character("Thorin", 1, 22, 18, {"STR": 5, "DEX": 2, "INT": 1}, attack_bonus=7, damage=14, role="teammate"),
+        Character("Lyra", 2, 16, 14, {"STR": 2, "DEX": 3, "INT": 4}, attack_bonus=5, damage=9, role="teammate")
     ]
 
 
@@ -94,16 +103,21 @@ def get_combat_state(session_id: str, engine: CombatEngine) -> CombatState:
     """Generate current combat state."""
     winner = None
     if engine.is_battle_over():
-        if any(p.alive for p in engine.state.players):
+        # Check if any players or teammates are alive (they're on the same side)
+        players_and_teammates = [c for c in engine.state.players if c.role in ["player", "teammate"]]
+        if any(p.alive for p in players_and_teammates):
             winner = "players"
         else:
             winner = "enemies"
 
+    # Include teammates in the players list for the frontend (they're on the player's side)
+    all_player_side = [p for p in engine.state.players if p.role in ["player", "teammate"]]
+    
     return CombatState(
         session_id=session_id,
         round=engine.round,
         current_actor=engine.current_actor.name if engine.current_actor else None,
-        players=[character_to_dict(p) for p in engine.state.players],
+        players=[character_to_dict(p) for p in all_player_side],
         enemies=[character_to_dict(e) for e in engine.state.enemies],
         battle_over=engine.is_battle_over(),
         winner=winner
@@ -128,6 +142,12 @@ async def start_combat(request: InitiateCombatRequest) -> Dict:
             )
             for i, p in enumerate(request.players)
         ]
+        # If only one player provided (solo play), add 3 AI teammates
+        if len(players) == 1:
+            teammates = create_default_teammates()
+            # Add teammates to players list (they're on the player's side)
+            players.extend(teammates)
+            print(f"[COMBAT] Solo play detected: Added {len(teammates)} AI teammates")
     else:
         players = create_default_players()
 
@@ -222,12 +242,13 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
         )
 
     # Validate turn ownership
-    if actor.role == "player":
-        # It's a player turn - validate action was provided and not "enemy_turn"
+    if actor.role == "player" or actor.role == "teammate":
+        # It's a player or teammate turn - player controls all characters
+        # Validate action was provided and not "enemy_turn"
         if request.action == "enemy_turn":
-            raise HTTPException(status_code=400, detail="Cannot process enemy turn during player turn")
+            raise HTTPException(status_code=400, detail="Cannot process enemy turn during player/teammate turn")
         if not request.action or request.action.strip() == "":
-            raise HTTPException(status_code=400, detail="Action required for player turn")
+            raise HTTPException(status_code=400, detail="Action required for player/teammate turn")
         
         # Parse player action
         action = parser.parse(actor, request.action)

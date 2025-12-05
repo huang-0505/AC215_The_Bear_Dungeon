@@ -214,28 +214,38 @@ class CombatEngine:
 
     def roll_initiative(self) -> deque:
         """Roll initiative for all combatants and return turn order.
-        Players always go first as a workaround for enemy turn freezing issues.
+        Main player always goes first, then other players/teammates, then enemies.
         """
         chars = self.state.get_all()
         
-        # Separate players and enemies
-        players = [c for c in chars if c.role == "player"]
+        # Separate main player, other players/teammates, and enemies
+        main_player = [c for c in chars if c.role == "player"]
+        teammates = [c for c in chars if c.role == "teammate"]
         enemies = [c for c in chars if c.role == "enemy"]
         
-        # Roll initiative within each group
-        player_scores = [
-            (c, random.randint(1, 20) + c.attributes.get("DEX", 0)) for c in players
-        ]
-        enemy_scores = [
-            (c, random.randint(1, 20) + c.attributes.get("DEX", 0)) for c in enemies
-        ]
+        # Main player always goes first
+        turn_order = []
+        if main_player:
+            turn_order.append(main_player[0])
         
-        # Sort each group by initiative
-        ordered_players = sorted(player_scores, key=lambda x: x[1], reverse=True)
-        ordered_enemies = sorted(enemy_scores, key=lambda x: x[1], reverse=True)
+        # Roll initiative for teammates
+        if teammates:
+            teammate_scores = [
+                (c, random.randint(1, 20) + c.attributes.get("DEX", 0), random.random()) for c in teammates
+            ]
+            # Sort by initiative score (descending), then by random tie-breaker (descending) for randomization
+            ordered_teammates = sorted(teammate_scores, key=lambda x: (x[1], x[2]), reverse=True)
+            turn_order.extend([c for c, _, _ in ordered_teammates])
         
-        # Players always go first, then enemies
-        turn_order = [c for c, _ in ordered_players] + [c for c, _ in ordered_enemies]
+        # Roll initiative for enemies
+        if enemies:
+            enemy_scores = [
+                (c, random.randint(1, 20) + c.attributes.get("DEX", 0), random.random()) for c in enemies
+            ]
+            # Sort by initiative score (descending), then by random tie-breaker (descending) for randomization
+            ordered_enemies = sorted(enemy_scores, key=lambda x: (x[1], x[2]), reverse=True)
+            turn_order.extend([c for c, _, _ in ordered_enemies])
+        
         return deque(turn_order)
 
     def next_turn(self) -> Character:
@@ -260,6 +270,8 @@ class CombatEngine:
 
     def is_battle_over(self) -> bool:
         """Check if battle has ended (one side eliminated)."""
-        players_alive = any(p.alive for p in self.state.players)
+        # Players and teammates are on the same side
+        players_and_teammates = [c for c in self.state.players if c.role in ["player", "teammate"]]
+        players_alive = any(p.alive for p in players_and_teammates)
         enemies_alive = any(e.alive for e in self.state.enemies)
         return not (players_alive and enemies_alive)
