@@ -483,7 +483,7 @@ def handle_narration_action(tree: GameStateTree, current_node, data: UserInput, 
     tree.increment_narration_round()
     
     # Check for round-based combat trigger FIRST (before processing action)
-    if tree.should_trigger_combat():
+    if tree.should_trigger_combat() and tree.combat_count < tree.max_combats:
         logger.info(f"Combat forced at round {tree.narration_round}")
 
         combat_node = tree.add_child(
