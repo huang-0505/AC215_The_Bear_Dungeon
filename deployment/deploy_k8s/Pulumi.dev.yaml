@@ -1,0 +1,7 @@
+encryptionsalt: v1:Ql1K//qmtaQ=:v1:fhFyMtpDtq0O41hJ:fA2sI27np3naGsGEOOg3GMoHM2TJfw==
+config:
+  gcp:project: even-turbine-471117-u0
+  security:ssh_user: sa_100356675694899362678
+  security:gcp_service_account_email: deployment-103@even-turbine-471117-u0.iam.gserviceaccount.com
+  security:gcp_ksa_service_account_email: gcp-service-207@even-turbine-471117-u0.iam.gserviceaccount.com
+  deploy-k8s:setupSSL: "false"

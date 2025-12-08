@@ -1,0 +1,5 @@
+encryptionsalt: v1:vmgGxQyBMLw=:v1:vZuGFwZ7Y0y/nMOr:s1r530hWuVrwvMpJQ88UOOYecoaHVA==
+config:
+  gcp:project: even-turbine-471117-u0
+  security:gcp_service_account_email: deployment-103@even-turbine-471117-u0.iam.gserviceaccount.com
+  security:gcp_ksa_service_account_email: gcp-service-207@even-turbine-471117-u0.iam.gserviceaccount.com

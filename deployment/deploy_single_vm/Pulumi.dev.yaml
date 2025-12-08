@@ -1,0 +1,5 @@
+encryptionsalt: v1:fUA2EQpVsDI=:v1:8sctthZ+DiAneGTq:OlbFRqieDhhU9g699EndSApGK5KVDw==
+config:
+  gcp:project: even-turbine-471117-u0
+  security:ssh_user: sa_100356675694899362678
+  security:gcp_service_account_email: deployment-103@even-turbine-471117-u0.iam.gserviceaccount.com

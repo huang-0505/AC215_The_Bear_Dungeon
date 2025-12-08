@@ -1,0 +1,82 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emoji-html
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>Emoji Rain</title>
+      <style>
+        body { margin: 0; overflow: hidden; background: black; }
+        .emoji {
+          position: absolute;
+          font-size: 48px;
+          animation: fall linear infinite;
+        }
+        @keyframes fall {
+          from { transform: translateY(-10%); opacity: 1; }
+          to   { transform: translateY(110%); opacity: 0; }
+        }
+      </style>
+      <script>
+        const emojis = ["😀","😂","🤩","🐙","🍕","🔥","🦄","🐶","🌈","🥑","💥","🧠"];
+        function spawnEmoji() {
+          const e = document.createElement("div");
+          e.className = "emoji";
+          e.textContent = emojis[Math.floor(Math.random()*emojis.length)];
+          e.style.left = Math.random() * 100 + "vw";
+          e.style.animationDuration = (2 + Math.random()*2) + "s";
+          document.body.appendChild(e);
+          setTimeout(() => e.remove(), 3000);
+        }
+        setInterval(spawnEmoji, 120);
+      </script>
+    </head>
+    <body></body>
+    </html>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: emojirain
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: emojirain
+  template:
+    metadata:
+      labels:
+        app: emojirain
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html/index.html
+          subPath: index.html
+      volumes:
+      - name: html
+        configMap:
+          name: emoji-html
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: emojirain
+spec:
+  type: LoadBalancer
+  selector:
+    app: emojirain
+  ports:
+    - port: 80
+      targetPort: 80
