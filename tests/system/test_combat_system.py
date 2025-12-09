@@ -1,6 +1,6 @@
 """
 System tests for the complete DnD Combat System.
-Requires running Docker services (docker-compose up).
+Requires running Docker services (docker compose up).
 """
 
 import pytest
@@ -49,11 +49,10 @@ def is_combat_agent_running(url: str) -> bool:
 
 
 # Note: These tests require combat-agent running (not orchestrator)
-# They are NOT run in CI - only for local testing with full docker-compose setup
-# @pytest.mark.system  # Removed - these don't run in CI
+@pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(COMBAT_API_URL),
-    reason="Service not running at localhost:9000. Run 'docker-compose up' first."
+    reason="Service not running at localhost:9000. Run 'docker compose up' first."
 )
 @pytest.mark.skipif(
     not is_combat_agent_running(COMBAT_API_URL),
@@ -204,11 +203,10 @@ class TestCombatSystemDirect:
 
 
 # Note: These tests require full docker-compose setup
-# They are NOT run in CI - only for local testing
-# @pytest.mark.system  # Removed - these don't run in CI
+@pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(NGINX_URL, "/api"),
-    reason="Nginx not running at localhost:8080. Run 'docker-compose up' first."
+    reason="Nginx not running at localhost:8080. Run 'docker compose up' first."
 )
 class TestSystemViaGateway:
     """System tests accessing Combat API through API Gateway/Nginx."""
@@ -223,8 +221,8 @@ class TestSystemViaGateway:
         assert response.status_code in [200, 404]  # Depends on nginx config
 
 
-# Note: These tests are informational only - not required for CI
-# @pytest.mark.system  # Removed - these don't run in CI
+# Note: These tests are informational - check service availability
+@pytest.mark.system
 class TestServiceAvailability:
     """Test availability of all system components."""
 
