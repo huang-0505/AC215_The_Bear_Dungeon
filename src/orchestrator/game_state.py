@@ -13,18 +13,20 @@ from uuid import uuid4
 
 class GameStateType(Enum):
     """Types of game states"""
-    NARRATION = "narration"      # Story/exploration mode
-    COMBAT = "combat"            # Combat encounter
-    DIALOGUE = "dialogue"        # NPC conversation
-    DECISION = "decision"        # Player choice point
-    GAME_OVER = "game_over"      # End state
+
+    NARRATION = "narration"  # Story/exploration mode
+    COMBAT = "combat"  # Combat encounter
+    DIALOGUE = "dialogue"  # NPC conversation
+    DECISION = "decision"  # Player choice point
+    GAME_OVER = "game_over"  # End state
 
 
 class AgentType(Enum):
     """Types of agents handling states"""
-    NARRATOR = "narrator"        # Finetuned narrator model
-    COMBAT = "combat"            # Combat agent
-    ORCHESTRATOR = "orchestrator" # Decision router
+
+    NARRATOR = "narrator"  # Finetuned narrator model
+    COMBAT = "combat"  # Combat agent
+    ORCHESTRATOR = "orchestrator"  # Decision router
 
 
 class GameStateNode:
@@ -35,7 +37,7 @@ class GameStateNode:
         state_type: GameStateType,
         agent: AgentType,
         parent_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         self.id = str(uuid4())
         self.state_type = state_type
@@ -80,7 +82,7 @@ class GameStateNode:
             "rule_validation": self.rule_validation,
             "applicable_rules": self.applicable_rules,
             "was_validated": self.was_validated,
-            "validation_errors": self.validation_errors
+            "validation_errors": self.validation_errors,
         }
 
 
@@ -91,42 +93,29 @@ class GameStateTree:
         self.nodes: Dict[str, GameStateNode] = {}
         self.root_id: Optional[str] = None
         self.current_node_id: Optional[str] = None
-        
+
         # Round and combat tracking
         self.narration_round: int = 0  # Count of narration actions (not combat rounds)
         self.combat_count: int = 0  # Number of combats completed
         self.max_combats: int = 5  # Game ends after this many combats (configurable)
-        self.combat_rounds: List[int] = [3, 5, 10,15]  # Rounds where combat is forced (configurable)
+        self.combat_rounds: List[int] = [3, 5, 10, 15]  # Rounds where combat is forced (configurable)
 
     def create_root(self, state_type: GameStateType = GameStateType.NARRATION) -> GameStateNode:
         """Initialize the game with a root narration node"""
-        root = GameStateNode(
-            state_type=state_type,
-            agent=AgentType.NARRATOR,
-            metadata={"is_root": True}
-        )
+        root = GameStateNode(state_type=state_type, agent=AgentType.NARRATOR, metadata={"is_root": True})
         self.nodes[root.id] = root
         self.root_id = root.id
         self.current_node_id = root.id
         return root
 
     def add_child(
-        self,
-        parent_id: str,
-        state_type: GameStateType,
-        agent: AgentType,
-        metadata: Optional[Dict] = None
+        self, parent_id: str, state_type: GameStateType, agent: AgentType, metadata: Optional[Dict] = None
     ) -> GameStateNode:
         """Add a new state as a child of the current state"""
         if parent_id not in self.nodes:
             raise ValueError(f"Parent node {parent_id} not found")
 
-        child = GameStateNode(
-            state_type=state_type,
-            agent=agent,
-            parent_id=parent_id,
-            metadata=metadata
-        )
+        child = GameStateNode(state_type=state_type, agent=agent, parent_id=parent_id, metadata=metadata)
 
         self.nodes[child.id] = child
         self.nodes[parent_id].children.append(child.id)
@@ -163,19 +152,19 @@ class GameStateTree:
     def increment_narration_round(self):
         """Increment narration round counter"""
         self.narration_round += 1
-    
+
     def increment_combat_count(self):
         """Increment combat counter"""
         self.combat_count += 1
-    
+
     def should_trigger_combat(self) -> bool:
         """Check if combat should be triggered based on round"""
         return self.narration_round in self.combat_rounds
-    
+
     def should_end_game(self) -> bool:
         """Check if game should end based on combat count"""
         return self.combat_count >= self.max_combats
-    
+
     def to_dict(self) -> Dict:
         """Convert entire tree to dictionary"""
         return {
@@ -185,5 +174,5 @@ class GameStateTree:
             "narration_round": self.narration_round,
             "combat_count": self.combat_count,
             "max_combats": self.max_combats,
-            "combat_rounds": self.combat_rounds
+            "combat_rounds": self.combat_rounds,
         }

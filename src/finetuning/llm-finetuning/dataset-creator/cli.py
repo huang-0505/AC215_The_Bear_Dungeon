@@ -70,6 +70,7 @@ Guidelines:
 
 This is for fine-tuning purposes based on actual D&D gameplay transcripts."""
 
+
 def count_tokens(text):
     """
     Count tokens in text using tiktoken (GPT-4 tokenizer as approximation for Gemini)
@@ -131,44 +132,35 @@ def prepare(max_samples=1000, use_all=False):
         test_processed = []
 
         # Process train split
-        if 'train' in dataset:
+        if "train" in dataset:
             print(f"Processing train split ({len(dataset['train'])} samples)...")
-            for i, sample in enumerate(dataset['train']):
-                chunk = sample['chunk']
+            for i, sample in enumerate(dataset["train"]):
+                chunk = sample["chunk"]
                 if chunk and len(chunk.strip()) > 50:
                     context = f"Continue the D&D story and narrate what happens next:"
-                    train_processed.append({
-                        "context": context,
-                        "response": chunk
-                    })
+                    train_processed.append({"context": context, "response": chunk})
                 if (i + 1) % 1000 == 0:
                     print(f"Processed {i + 1}/{len(dataset['train'])} train samples")
 
         # Process validation split (this will be used as Gemini's validation data)
-        if 'validation' in dataset:
+        if "validation" in dataset:
             print(f"Processing validation split ({len(dataset['validation'])} samples)...")
-            for i, sample in enumerate(dataset['validation']):
-                chunk = sample['chunk']
+            for i, sample in enumerate(dataset["validation"]):
+                chunk = sample["chunk"]
                 if chunk and len(chunk.strip()) > 50:
                     context = f"Continue the D&D story and narrate what happens next:"
-                    validation_processed.append({
-                        "context": context,
-                        "response": chunk
-                    })
+                    validation_processed.append({"context": context, "response": chunk})
                 if (i + 1) % 1000 == 0:
                     print(f"Processed {i + 1}/{len(dataset['validation'])} validation samples")
 
         # Process test split (for future evaluation, not used in fine-tuning)
-        if 'test' in dataset:
+        if "test" in dataset:
             print(f"Processing test split ({len(dataset['test'])} samples)...")
-            for i, sample in enumerate(dataset['test']):
-                chunk = sample['chunk']
+            for i, sample in enumerate(dataset["test"]):
+                chunk = sample["chunk"]
                 if chunk and len(chunk.strip()) > 50:
                     context = f"Continue the D&D story and narrate what happens next:"
-                    test_processed.append({
-                        "context": context,
-                        "response": chunk
-                    })
+                    test_processed.append({"context": context, "response": chunk})
                 if (i + 1) % 1000 == 0:
                     print(f"Processed {i + 1}/{len(dataset['test'])} test samples")
 
@@ -196,21 +188,18 @@ def prepare(max_samples=1000, use_all=False):
         processed_data = []
 
         # Use the train split
-        train_data = dataset['train']
+        train_data = dataset["train"]
 
         # Limit the number of samples to process
         num_samples = min(max_samples, len(train_data))
 
         for i in range(num_samples):
             sample = train_data[i]
-            chunk = sample['chunk']
+            chunk = sample["chunk"]
 
             if chunk and len(chunk.strip()) > 50:
                 context = f"Continue the D&D story and narrate what happens next:"
-                processed_data.append({
-                    "context": context,
-                    "response": chunk
-                })
+                processed_data.append({"context": context, "response": chunk})
 
             if (i + 1) % 100 == 0:
                 print(f"Processed {i + 1}/{num_samples} samples")
@@ -234,9 +223,9 @@ def prepare(max_samples=1000, use_all=False):
     print(df_all.head())
 
     # Count tokens for cost estimation
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TOKEN COUNT ANALYSIS FOR COST ESTIMATION")
-    print("="*60)
+    print("=" * 60)
 
     print("\nCounting tokens (this may take a moment)...")
 
@@ -283,7 +272,7 @@ def prepare(max_samples=1000, use_all=False):
         print(f"    {epochs} epoch(s):  {total_tokens:,} tokens = ${cost:.2f}")
 
     print("\n  📌 Recommended: 3-4 epochs for optimal results")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     # Save the full dataset
     filename = os.path.join(OUTPUT_FOLDER, "dnd-instruct-dataset.csv")
@@ -356,9 +345,7 @@ def upload():
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     timeout = 300
 
-    data_files = glob.glob(os.path.join(OUTPUT_FOLDER, "*.jsonl")) + glob.glob(
-        os.path.join(OUTPUT_FOLDER, "*.csv")
-    )
+    data_files = glob.glob(os.path.join(OUTPUT_FOLDER, "*.jsonl")) + glob.glob(os.path.join(OUTPUT_FOLDER, "*.csv"))
     data_files.sort()
 
     # Upload to a D&D-specific folder
@@ -385,7 +372,9 @@ def main(args=None):
 if __name__ == "__main__":
     # Generate the inputs arguments parser
     # if you type into the terminal '--help', it will provide the description
-    parser = argparse.ArgumentParser(description="DnD Narrator Dataset Creator - Load CRD3 and prepare for Gemini fine-tuning")
+    parser = argparse.ArgumentParser(
+        description="DnD Narrator Dataset Creator - Load CRD3 and prepare for Gemini fine-tuning"
+    )
 
     parser.add_argument(
         "--prepare",

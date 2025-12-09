@@ -28,15 +28,13 @@ CHROMADB_PORT = int(os.environ.get("CHROMADB_PORT", "8000"))
 COLLECTION_NAME = "char-split-dnd-rules-collection"
 
 # Initialize LLM Client
-llm_client = genai.Client(
-    vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION
-)
+llm_client = genai.Client(vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION)
 
 # Initialize FastAPI
 app = FastAPI(
     title="D&D Rule Agent API",
     description="Validates player actions against official D&D rules using RAG",
-    version="1.0"
+    version="1.0",
 )
 
 # Enable CORS
@@ -89,22 +87,14 @@ class ValidationResponse(BaseModel):
 # Routes
 @app.get("/")
 async def root():
-    return {
-        "service": "D&D Rule Agent API",
-        "status": "active",
-        "collection": COLLECTION_NAME
-    }
+    return {"service": "D&D Rule Agent API", "status": "active", "collection": COLLECTION_NAME}
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     db_status = "connected" if get_collection() is not None else "disconnected"
-    return {
-        "status": "healthy",
-        "chromadb": db_status,
-        "collection": COLLECTION_NAME
-    }
+    return {"status": "healthy", "chromadb": db_status, "collection": COLLECTION_NAME}
 
 
 @app.post("/validate", response_model=ValidationResponse)
@@ -121,8 +111,12 @@ async def validate_action(req: ValidationRequest):
 
     # Check for sabotage patterns
     sabotage_keywords = [
-        "sabotage", "kill the boss right now", "destroy the story",
-        "delete the campaign", "break the game", "i'm gonna kill"
+        "sabotage",
+        "kill the boss right now",
+        "destroy the story",
+        "delete the campaign",
+        "break the game",
+        "i'm gonna kill",
     ]
     if any(keyword in req.user_input.lower() for keyword in sabotage_keywords):
         return ValidationResponse(
@@ -130,7 +124,7 @@ async def validate_action(req: ValidationRequest):
             validation_type="sabotage",
             explanation="Meta-gaming or sabotage attempt detected. Please provide an in-character action.",
             rule_text="",
-            suggested_correction="Please rephrase your action as something your character would do in the game world."
+            suggested_correction="Please rephrase your action as something your character would do in the game world.",
         )
 
     # Get collection
@@ -141,15 +135,12 @@ async def validate_action(req: ValidationRequest):
             is_valid=True,
             validation_type="no_validation",
             explanation="Rule database unavailable - action allowed by default",
-            rule_text=""
+            rule_text="",
         )
 
     try:
         # Step 1: Use LLM with function calling to retrieve rules
-        user_prompt = Content(
-            role="user",
-            parts=[Part(text=req.user_input)]
-        )
+        user_prompt = Content(role="user", parts=[Part(text=req.user_input)])
 
         response = llm_client.models.generate_content(
             model=GENERATIVE_MODEL,
@@ -158,17 +149,12 @@ async def validate_action(req: ValidationRequest):
                 temperature=0,
                 system_instruction=SYSTEM_INSTRUCTION,
                 tools=[agent_tools.dnd_rule_tool],
-                tool_config=types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(mode="any")
-                )
-            )
+                tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="any")),
+            ),
         )
 
         # Step 2: Execute function calls to retrieve rule chunks
-        function_calls = [
-            part.function_call for part in response.candidates[0].content.parts
-            if part.function_call
-        ]
+        function_calls = [part.function_call for part in response.candidates[0].content.parts if part.function_call]
 
         if len(function_calls) == 0:
             # No rules found - allow action
@@ -176,7 +162,7 @@ async def validate_action(req: ValidationRequest):
                 is_valid=True,
                 validation_type="no_rules",
                 explanation="No specific D&D rules apply to this action. Proceeding with narrative interpretation.",
-                rule_text=""
+                rule_text="",
             )
 
         function_responses = agent_tools.execute_function_calls(
@@ -186,15 +172,10 @@ async def validate_action(req: ValidationRequest):
         # Step 3: Get final validation from LLM with retrieved rules
         final_response = llm_client.models.generate_content(
             model=GENERATIVE_MODEL,
-            contents=[
-                user_prompt,
-                response.candidates[0].content,
-                Content(parts=function_responses)
-            ],
+            contents=[user_prompt, response.candidates[0].content, Content(parts=function_responses)],
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                tools=[agent_tools.dnd_rule_tool]
-            )
+                system_instruction=SYSTEM_INSTRUCTION, tools=[agent_tools.dnd_rule_tool]
+            ),
         )
 
         # Extract rule text from function response
@@ -206,7 +187,7 @@ async def validate_action(req: ValidationRequest):
             is_valid=True,  # Rule agent informs, doesn't reject
             validation_type="valid",
             explanation=final_response.text,
-            rule_text=rule_text
+            rule_text=rule_text,
         )
 
     except Exception as e:
@@ -215,7 +196,7 @@ async def validate_action(req: ValidationRequest):
             is_valid=True,
             validation_type="error",
             explanation=f"Validation error occurred: {str(e)}. Action allowed by default.",
-            rule_text=""
+            rule_text="",
         )
 
 
@@ -231,9 +212,7 @@ async def retrieve_rules(req: RuleRetrievalRequest):
         raise HTTPException(status_code=503, detail="ChromaDB unavailable")
 
     try:
-        rules_text = agent_tools.retrieve_dnd_rules(
-            req.query, coll, generate_query_embedding, n_results=req.n_results
-        )
+        rules_text = agent_tools.retrieve_dnd_rules(req.query, coll, generate_query_embedding, n_results=req.n_results)
         return {"rules": rules_text}
 
     except Exception as e:

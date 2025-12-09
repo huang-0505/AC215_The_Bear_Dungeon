@@ -20,7 +20,7 @@ class CampaignTemplate:
         opening_narrative: str,
         starting_location: str,
         initial_quest: Optional[str] = None,
-        difficulty: str = "medium"
+        difficulty: str = "medium",
     ):
         self.id = id
         self.name = name
@@ -38,7 +38,7 @@ class CampaignTemplate:
             "opening_narrative": self.opening_narrative,
             "starting_location": self.starting_location,
             "initial_quest": self.initial_quest,
-            "difficulty": self.difficulty
+            "difficulty": self.difficulty,
         }
 
 
@@ -59,9 +59,8 @@ As the ship glides into the cove, you can make out wooden docks and a small clus
 What do you do?""",
         starting_location="Dragon's Rest Harbor",
         initial_quest="Explore Stormwreck Isle and discover why the dragons have called you here.",
-        difficulty="beginner"
+        difficulty="beginner",
     ),
-
     "classic-dungeon": CampaignTemplate(
         id="classic-dungeon",
         name="The Lost Mine of Phandelver",
@@ -77,9 +76,8 @@ Now, as your wagon crests a hill, you see something troubling: two dead horses l
 The forest on either side of the trail is eerily quiet. What do you do?""",
         starting_location="The Triboar Trail",
         initial_quest="Find Gundren Rockseeker and discover what happened on the trail.",
-        difficulty="medium"
+        difficulty="medium",
     ),
-
     "wilderness-adventure": CampaignTemplate(
         id="wilderness-adventure",
         name="Tomb of Annihilation",
@@ -97,9 +95,8 @@ A wizened guide approaches you, his reptilian eyes gleaming. "You seek the tomb,
 What do you do?""",
         starting_location="Port Nyanzaru, Chult",
         initial_quest="Journey into the jungle and find the source of the death curse.",
-        difficulty="hard"
+        difficulty="hard",
     ),
-
     "gothic-horror": CampaignTemplate(
         id="gothic-horror",
         name="Curse of Strahd",
@@ -123,9 +120,8 @@ The letter trails off in bloodstains.
 What do you do?""",
         starting_location="The road to Barovia",
         initial_quest="Reach the village of Barovia and save Ireena from Count Strahd.",
-        difficulty="hard"
+        difficulty="hard",
     ),
-
     "planar-adventure": CampaignTemplate(
         id="planar-adventure",
         name="Planescape: Descent into Avernus",
@@ -147,8 +143,8 @@ Behind her, through the window, you can see it: a tear in reality itself, pulsin
 What do you do?""",
         starting_location="Baldur's Gate",
         initial_quest="Discover what happened to Elturel and find a way to save it from Hell.",
-        difficulty="very hard"
-    )
+        difficulty="very hard",
+    ),
 }
 
 
@@ -167,9 +163,7 @@ class CampaignLoader:
 
     @staticmethod
     def initialize_campaign(
-        campaign_id: str,
-        character_class: Optional[str] = None,
-        character_name: Optional[str] = None
+        campaign_id: str, character_class: Optional[str] = None, character_name: Optional[str] = None
     ) -> Dict:
         """
         Initialize a campaign with optional character customization.
@@ -198,8 +192,8 @@ class CampaignLoader:
             "metadata": {
                 "difficulty": campaign.difficulty,
                 "character_class": character_class,
-                "character_name": character_name
-            }
+                "character_name": character_name,
+            },
         }
 
     @staticmethod
@@ -217,7 +211,7 @@ class CampaignLoader:
             "Monk": f"You are {character_name}, a martial artist who has honed your body into a living weapon.",
             "Druid": f"You are {character_name}, a guardian of nature who can call upon primal forces.",
             "Warlock": f"You are {character_name}, bound by a pact with an otherworldly patron who grants you eldritch power.",
-            "Sorcerer": f"You are {character_name}, born with magic flowing through your very veins."
+            "Sorcerer": f"You are {character_name}, born with magic flowing through your very veins.",
         }
 
         return intros.get(character_class, f"You are {character_name}, an adventurer seeking glory and treasure.")

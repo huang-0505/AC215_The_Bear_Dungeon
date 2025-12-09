@@ -61,7 +61,7 @@ def create_default_players() -> List[Character]:
         Character("Wizard", 1, 14, 8, {"STR": 1, "DEX": 2, "INT": 5}, attack_bonus=3, damage=12),
         Character("Ranger", 2, 16, 10, {"STR": 3, "DEX": 4, "INT": 2}, attack_bonus=6, damage=10),
         Character("Cleric", 3, 15, 10, {"STR": 2, "DEX": 2, "INT": 4}, attack_bonus=4, damage=8),
-        Character("Barbarian", 4, 26, 18, {"STR": 5, "DEX": 3, "INT": 1}, attack_bonus=8, damage=18)
+        Character("Barbarian", 4, 26, 18, {"STR": 5, "DEX": 3, "INT": 1}, attack_bonus=8, damage=18),
     ]
 
 
@@ -70,7 +70,7 @@ def create_default_enemies() -> List[Character]:
     return [
         Character("Goblin", 0, 2, 1, {"DEX": 3}, attack_bonus=3, damage=6, role="enemy"),
         Character("Troll", 3, 6, 1, {"STR": 4, "DEX": 2}, attack_bonus=5, damage=8, role="enemy"),
-        Character("Dragon", 4, 2, 2, {"STR": 6, "DEX": 6, "INT": 6}, attack_bonus=8, damage=12, role="enemy")
+        Character("Dragon", 4, 2, 2, {"STR": 6, "DEX": 6, "INT": 6}, attack_bonus=8, damage=12, role="enemy"),
     ]
 
 
@@ -79,7 +79,7 @@ def create_default_teammates() -> List[Character]:
     return [
         Character("Aria", 0, 18, 16, {"STR": 3, "DEX": 4, "INT": 2}, attack_bonus=6, damage=10, role="teammate"),
         Character("Thorin", 1, 22, 18, {"STR": 5, "DEX": 2, "INT": 1}, attack_bonus=7, damage=14, role="teammate"),
-        Character("Lyra", 2, 16, 14, {"STR": 2, "DEX": 3, "INT": 4}, attack_bonus=5, damage=9, role="teammate")
+        Character("Lyra", 2, 16, 14, {"STR": 2, "DEX": 3, "INT": 4}, attack_bonus=5, damage=9, role="teammate"),
     ]
 
 
@@ -95,7 +95,7 @@ def character_to_dict(char: Character) -> Dict:
         "attack_bonus": char.attack_bonus,
         "damage": char.damage,
         "role": char.role,
-        "alive": char.alive
+        "alive": char.alive,
     }
 
 
@@ -112,7 +112,7 @@ def get_combat_state(session_id: str, engine: CombatEngine) -> CombatState:
 
     # Include teammates in the players list for the frontend (they're on the player's side)
     all_player_side = [p for p in engine.state.players if p.role in ["player", "teammate"]]
-    
+
     return CombatState(
         session_id=session_id,
         round=engine.round,
@@ -120,7 +120,7 @@ def get_combat_state(session_id: str, engine: CombatEngine) -> CombatState:
         players=[character_to_dict(p) for p in all_player_side],
         enemies=[character_to_dict(e) for e in engine.state.enemies],
         battle_over=engine.is_battle_over(),
-        winner=winner
+        winner=winner,
     )
 
 
@@ -136,10 +136,7 @@ async def start_combat(request: InitiateCombatRequest) -> Dict:
     # Create characters
     if request.players:
         players = [
-            Character(
-                p.name, i, p.hp, p.ac, p.attributes,
-                p.attack_bonus, p.damage, p.role
-            )
+            Character(p.name, i, p.hp, p.ac, p.attributes, p.attack_bonus, p.damage, p.role)
             for i, p in enumerate(request.players)
         ]
         # If only one player provided (solo play), add 3 AI teammates
@@ -153,10 +150,7 @@ async def start_combat(request: InitiateCombatRequest) -> Dict:
 
     if request.enemies:
         enemies = [
-            Character(
-                e.name, i, e.hp, e.ac, e.attributes,
-                e.attack_bonus, e.damage, e.role
-            )
+            Character(e.name, i, e.hp, e.ac, e.attributes, e.attack_bonus, e.damage, e.role)
             for i, e in enumerate(request.enemies)
         ]
     else:
@@ -178,11 +172,7 @@ async def start_combat(request: InitiateCombatRequest) -> Dict:
     # Get initial state
     state = get_combat_state(session_id, engine)
 
-    return {
-        "session_id": session_id,
-        "message": "Combat initiated! Roll for initiative!",
-        "state": state.model_dump()
-    }
+    return {"session_id": session_id, "message": "Combat initiated! Roll for initiative!", "state": state.model_dump()}
 
 
 @router.get("/state/{session_id}")
@@ -203,7 +193,7 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
     """
     print(f"[COMBAT] ===== Action request received =====")
     print(f"[COMBAT] Session: {session_id}, Action: {request.action}")
-    
+
     if session_id not in combat_sessions:
         print(f"[COMBAT] ERROR: Session {session_id} not found")
         raise HTTPException(status_code=404, detail="Combat session not found")
@@ -216,11 +206,7 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
 
     if engine.is_battle_over():
         state = get_combat_state(session_id, engine)
-        return ActionResponse(
-            narrative="The battle has ended!",
-            raw_result="Battle over",
-            state=state
-        )
+        return ActionResponse(narrative="The battle has ended!", raw_result="Battle over", state=state)
 
     # Get current actor (or advance if none set)
     if not engine.current_actor:
@@ -235,11 +221,7 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
 
     if engine.is_battle_over():
         state = get_combat_state(session_id, engine)
-        return ActionResponse(
-            narrative="The battle has ended!",
-            raw_result="Battle over",
-            state=state
-        )
+        return ActionResponse(narrative="The battle has ended!", raw_result="Battle over", state=state)
 
     # Validate turn ownership
     if actor.role == "player" or actor.role == "teammate":
@@ -249,7 +231,7 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
             raise HTTPException(status_code=400, detail="Cannot process enemy turn during player/teammate turn")
         if not request.action or request.action.strip() == "":
             raise HTTPException(status_code=400, detail="Action required for player/teammate turn")
-        
+
         # Parse player action
         action = parser.parse(actor, request.action)
         if not action:
@@ -284,12 +266,13 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
         except Exception as e:
             print(f"[COMBAT] ERROR in enemy turn processing: {e}")
             import traceback
+
             traceback.print_exc()
             raise
 
     # Advance to next turn after processing action
     engine.next_turn()
-    
+
     # Skip dead actors in next turn
     while engine.current_actor and not engine.current_actor.alive and not engine.is_battle_over():
         engine.next_turn()
@@ -297,11 +280,7 @@ async def player_action(session_id: str, request: PlayerActionRequest) -> Action
     # Get updated state
     state = get_combat_state(session_id, engine)
 
-    return ActionResponse(
-        narrative=narrative,
-        raw_result=raw_result,
-        state=state
-    )
+    return ActionResponse(narrative=narrative, raw_result=raw_result, state=state)
 
 
 @router.delete("/session/{session_id}")

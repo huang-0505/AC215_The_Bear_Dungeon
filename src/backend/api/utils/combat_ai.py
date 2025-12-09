@@ -25,8 +25,8 @@ class ActionParser:
 
     def __init__(self, engine: CombatEngine):
         self.engine = engine
-        self.action_db_path = 'data/embeddings-actions.jsonl'
-        self.enemy_db_path = 'data/embeddings-enemies.jsonl'
+        self.action_db_path = "data/embeddings-actions.jsonl"
+        self.enemy_db_path = "data/embeddings-enemies.jsonl"
 
     def parse(self, actor: Character, user_input: str) -> Optional[dict]:
         """
@@ -81,11 +81,7 @@ class ActionParser:
         if not target:
             target = alive_enemies[0]
 
-        return {
-            "id": action_id,
-            "type": action_type,
-            "target": target
-        }
+        return {"id": action_id, "type": action_type, "target": target}
 
 
 # ========== Action Parser for Enemy AI ==========
@@ -94,8 +90,8 @@ class ActionParserBot:
 
     def __init__(self, engine: CombatEngine):
         self.engine = engine
-        self.action_db_path = 'data/embeddings-actions.jsonl'
-        self.ally_db_path = 'data/embeddings-allies.jsonl'
+        self.action_db_path = "data/embeddings-actions.jsonl"
+        self.ally_db_path = "data/embeddings-allies.jsonl"
 
     def parse(self, actor: Character, action_text: str) -> Optional[dict]:
         """
@@ -141,7 +137,9 @@ class ActionParserBot:
                 for candidate in valid_targets:
                     if candidate.id == ally_id:
                         target = candidate
-                        print(f"[ActionParserBot] Found target via semantic search: {target.name} (role: {target.role})")
+                        print(
+                            f"[ActionParserBot] Found target via semantic search: {target.name} (role: {target.role})"
+                        )
                         break
                 if target:
                     break
@@ -180,11 +178,7 @@ class ActionParserBot:
                 # Use random selection for variety
                 target = random.choice(valid_targets)
 
-        return {
-            "id": action_id,
-            "type": action_type,
-            "target": target
-        }
+        return {"id": action_id, "type": action_type, "target": target}
 
 
 # ========== Enemy AI Agent ==========
@@ -203,11 +197,7 @@ class DnDBot:
         try:
             if gcp_project:
                 print(f"[DnDBot] Attempting to initialize GenAI client...")
-                self.client = genai.Client(
-                    vertexai=True,
-                    project=gcp_project,
-                    location=gcp_location
-                )
+                self.client = genai.Client(vertexai=True, project=gcp_project, location=gcp_location)
                 self.use_llm = True
                 print(f"[DnDBot] GenAI client initialized successfully, use_llm=True")
             else:
@@ -215,6 +205,7 @@ class DnDBot:
         except Exception as e:
             print(f"[DnDBot] Failed to initialize GenAI client: {e}, using fallback strategy")
             import traceback
+
             traceback.print_exc()
         self.parser = ActionParserBot(engine)
 
@@ -231,7 +222,7 @@ class DnDBot:
                 config=types.GenerateContentConfig(
                     max_output_tokens=150,
                     temperature=0.7,
-                )
+                ),
             )
             result = response.text if response and response.text else None
             print(f"[DnDBot._call_genai_sync] GenAI API call completed, result length: {len(result) if result else 0}")
@@ -239,6 +230,7 @@ class DnDBot:
         except Exception as e:
             print(f"[DnDBot._call_genai_sync] GenAI call error: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -263,7 +255,9 @@ class DnDBot:
         # CRITICAL: Ensure enemies only target players/teammates, not other enemies
         if actor.role == "enemy":
             valid_targets = [t for t in valid_targets if t.role in ["player", "teammate"]]
-            print(f"[DnDBot] Enemy {actor.name} filtered targets to players/teammates only: {[t.name for t in valid_targets]}")
+            print(
+                f"[DnDBot] Enemy {actor.name} filtered targets to players/teammates only: {[t.name for t in valid_targets]}"
+            )
         # Similarly for teammates - only target enemies
         elif actor.role == "teammate":
             valid_targets = [t for t in valid_targets if t.role == "enemy"]
@@ -278,31 +272,33 @@ class DnDBot:
 
         # Update to use valid_targets instead of targets
         targets = valid_targets
-        
+
         # Score each target based on tactical factors
         scored_targets = []
         for t in targets:
             # Calculate HP percentage (lower is better - finish off wounded enemies)
             hp_percent = t.hp / t.max_hp if t.max_hp > 0 else 1.0
-            
+
             # AC factor (lower AC is easier to hit, so better target)
             # Normalize AC to 0-1 scale (assuming AC range 10-20, lower is better)
             ac_factor = (20 - t.ac) / 10.0  # Higher value = easier to hit
-            
+
             # Tactical score: prioritize low HP (70% weight) and lower AC (30% weight)
             # Add small random factor (10%) to avoid being too predictable
             tactical_score = (hp_percent * 0.7) - (ac_factor * 0.3) + (random.random() * 0.1)
-            
+
             scored_targets.append((t, tactical_score, hp_percent, t.ac))
-        
+
         # Sort by tactical score (lower score = better target)
         scored_targets.sort(key=lambda x: x[1])
-        
+
         # Pick from top 2-3 candidates to add some variety
         top_n = min(3, len(scored_targets))
         selected = random.choice(scored_targets[:top_n])[0]
-        
-        print(f"[DnDBot] Tactical target selection: {selected.name} (HP: {selected.hp}/{selected.max_hp}, AC: {selected.ac})")
+
+        print(
+            f"[DnDBot] Tactical target selection: {selected.name} (HP: {selected.hp}/{selected.max_hp}, AC: {selected.ac})"
+        )
         return selected
 
     async def decide_action(self) -> Optional[dict]:
@@ -339,14 +335,14 @@ class DnDBot:
         if not targets:
             print(f"[DnDBot] ERROR: No alive targets for {actor.role}")
             return None
-        
+
         # Use tactical target selection instead of random
         target = self._select_tactical_target(targets, actor)
         if not target:
             print(f"[DnDBot] ERROR: Failed to select tactical target")
             return None
         print(f"[DnDBot] Selected tactical target: {target.name} (actor role: {actor.role})")
-        
+
         # Try to use LLM for more interesting actions (only if client is available)
         if self.use_llm and self.client:
             try:
@@ -357,14 +353,14 @@ class DnDBot:
                     status = "CRITICAL" if hp_percent < 25 else "WOUNDED" if hp_percent < 50 else "HEALTHY"
                     target_info.append(f"  - {t.name}: HP {t.hp}/{t.max_hp} ({hp_percent}%, {status}), AC {t.ac}")
                 targets_str = "\n".join(target_info)
-                
+
                 # Build ally information
                 ally_info = []
                 for a in allies:
                     hp_percent = int((a.hp / a.max_hp) * 100) if a.max_hp > 0 else 100
                     ally_info.append(f"  - {a.name}: HP {a.hp}/{a.max_hp} ({hp_percent}%), AC {a.ac}")
                 allies_str = "\n".join(ally_info) if ally_info else "  (none)"
-                
+
                 # Construct tactical analysis prompt with detailed combat state
                 if actor.role == "teammate":
                     analysis_prompt = f"""
@@ -423,16 +419,15 @@ Example: "I attack {target.name} with my weapon" or "I focus my attack on the wo
                 except RuntimeError:
                     # Fallback if no running loop (shouldn't happen in FastAPI)
                     loop = asyncio.get_event_loop()
-                
+
                 print(f"[DnDBot] Starting GenAI call for {actor.name} (timeout: 3s)")
                 try:
                     # Use a shorter timeout (3 seconds) to fail fast
                     action_text = await asyncio.wait_for(
-                        loop.run_in_executor(_genai_executor, self._call_genai_sync, analysis_prompt),
-                        timeout=3.0
+                        loop.run_in_executor(_genai_executor, self._call_genai_sync, analysis_prompt), timeout=3.0
                     )
                     print(f"[DnDBot] GenAI call completed for {actor.name}")
-                    
+
                     if action_text:
                         # Parse LLM output into structured action
                         action = self.parser.parse(actor, action_text)
@@ -448,20 +443,20 @@ Example: "I attack {target.name} with my weapon" or "I focus my attack on the wo
                 except Exception as e:
                     print(f"[DnDBot] Error in async AI decision for {actor.name}: {e}")
                     import traceback
+
                     traceback.print_exc()
             except Exception as e:
                 print(f"[DnDBot] Error setting up AI decision (using fallback): {e}")
                 import traceback
+
                 traceback.print_exc()
         else:
-            print(f"[DnDBot] GenAI not available (use_llm={self.use_llm}, client={self.client is not None}), using fallback")
-        
+            print(
+                f"[DnDBot] GenAI not available (use_llm={self.use_llm}, client={self.client is not None}), using fallback"
+            )
+
         # Fallback to simple attack (always works, never hangs)
-        fallback_action = {
-            "id": 0,
-            "type": "MeleeAttack",
-            "target": target
-        }
+        fallback_action = {"id": 0, "type": "MeleeAttack", "target": target}
         print(f"[DnDBot] Returning fallback action: {fallback_action}")
         return fallback_action
 
@@ -478,11 +473,7 @@ class DnDNarrator:
         try:
             if gcp_project:
                 print(f"[DnDNarrator] Initializing GenAI client...")
-                self.client = genai.Client(
-                    vertexai=True,
-                    project=gcp_project,
-                    location=gcp_location
-                )
+                self.client = genai.Client(vertexai=True, project=gcp_project, location=gcp_location)
                 self.use_genai = True
                 print(f"[DnDNarrator] GenAI client initialized successfully")
             else:
@@ -504,14 +495,17 @@ class DnDNarrator:
                 config=types.GenerateContentConfig(
                     max_output_tokens=200,
                     temperature=0.8,
-                )
+                ),
             )
             result = response.text.strip() if response and response.text else None
-            print(f"[DnDNarrator._call_genai_sync] GenAI API call completed, result length: {len(result) if result else 0}")
+            print(
+                f"[DnDNarrator._call_genai_sync] GenAI API call completed, result length: {len(result) if result else 0}"
+            )
             return result
         except Exception as e:
             print(f"[DnDNarrator._call_genai_sync] GenAI call error: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -555,7 +549,7 @@ Be dramatic and immersive. Make it feel epic!
             try:
                 narrative_text = await asyncio.wait_for(
                     loop.run_in_executor(_genai_executor, self._call_genai_sync, narrative_prompt),
-                    timeout=5.0  # 5 second timeout for narration
+                    timeout=5.0,  # 5 second timeout for narration
                 )
                 if narrative_text:
                     print(f"[DnDNarrator] Narrative generated successfully")
@@ -569,10 +563,12 @@ Be dramatic and immersive. Make it feel epic!
             except Exception as e:
                 print(f"[DnDNarrator] Error in async narration: {e}")
                 import traceback
+
                 traceback.print_exc()
                 return action_result
         except Exception as e:
             print(f"[DnDNarrator] Error setting up narration (using fallback): {e}")
             import traceback
+
             traceback.print_exc()
             return action_result

@@ -37,12 +37,7 @@ class RuleValidator:
         """
         try:
             response = requests.post(
-                f"{self.rule_agent_url}/validate",
-                json={
-                    "user_input": user_input,
-                    "context": game_context
-                },
-                timeout=10
+                f"{self.rule_agent_url}/validate", json={"user_input": user_input, "context": game_context}, timeout=10
             )
             response.raise_for_status()
             return response.json()
@@ -53,7 +48,7 @@ class RuleValidator:
                 "is_valid": True,
                 "validation_type": "no_validation",
                 "rule_text": "",
-                "explanation": "Rule Agent unavailable - action allowed by default"
+                "explanation": "Rule Agent unavailable - action allowed by default",
             }
 
         except requests.exceptions.Timeout:
@@ -62,7 +57,7 @@ class RuleValidator:
                 "is_valid": True,
                 "validation_type": "no_validation",
                 "rule_text": "",
-                "explanation": "Rule Agent timeout - action allowed by default"
+                "explanation": "Rule Agent timeout - action allowed by default",
             }
 
         except Exception as e:
@@ -71,7 +66,7 @@ class RuleValidator:
                 "is_valid": True,
                 "validation_type": "error",
                 "rule_text": "",
-                "explanation": f"Validation error: {str(e)} - action allowed by default"
+                "explanation": f"Validation error: {str(e)} - action allowed by default",
             }
 
     def is_sabotage(self, validation_result: Dict) -> bool:
@@ -91,12 +86,7 @@ class RuleValidator:
         """
         try:
             response = requests.post(
-                f"{self.rule_agent_url}/retrieve_rules",
-                json={
-                    "query": action,
-                    "n_results": n_results
-                },
-                timeout=10
+                f"{self.rule_agent_url}/retrieve_rules", json={"query": action, "n_results": n_results}, timeout=10
             )
             response.raise_for_status()
             return response.json().get("rules", "")
@@ -108,10 +98,7 @@ class RuleValidator:
     def check_health(self) -> bool:
         """Check if the Rule Agent service is available"""
         try:
-            response = requests.get(
-                f"{self.rule_agent_url}/health",
-                timeout=5
-            )
+            response = requests.get(f"{self.rule_agent_url}/health", timeout=5)
             return response.status_code == 200
         except:
             return False

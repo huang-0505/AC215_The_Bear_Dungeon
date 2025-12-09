@@ -16,15 +16,13 @@ retrieve_dnd_rules_func = types.FunctionDeclaration(
         properties={
             "query": types.Schema(
                 type=types.Type.STRING,
-                description="User action or intent (e.g. 'attack the goblin', 'move 30 feet', 'cast fireball')."
+                description="User action or intent (e.g. 'attack the goblin', 'move 30 feet', 'cast fireball').",
             ),
             "n_results": types.Schema(
-                type=types.Type.INTEGER,
-                description="Number of relevant rule chunks to retrieve.",
-                default=5
+                type=types.Type.INTEGER, description="Number of relevant rule chunks to retrieve.", default=5
             ),
         },
-        required=["query"]
+        required=["query"],
     ),
 )
 
@@ -38,10 +36,7 @@ def retrieve_dnd_rules(query, collection, embed_func, n_results=5):
     """
     query_embedding = embed_func(query)
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=n_results
-    )
+    results = collection.query(query_embeddings=[query_embedding], n_results=n_results)
 
     # Return concatenated rule text
     return "\n\n".join(results["documents"][0])
@@ -50,9 +45,7 @@ def retrieve_dnd_rules(query, collection, embed_func, n_results=5):
 # -------------------------------------------------------
 # Tool Definition
 # -------------------------------------------------------
-dnd_rule_tool = types.Tool(
-    function_declarations=[retrieve_dnd_rules_func]
-)
+dnd_rule_tool = types.Tool(function_declarations=[retrieve_dnd_rules_func])
 
 
 # -------------------------------------------------------

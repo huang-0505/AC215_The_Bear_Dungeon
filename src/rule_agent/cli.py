@@ -32,8 +32,7 @@ CHROMADB_PORT = int(os.environ.get("CHROMADB_PORT", "8000"))
 
 #############################################################################
 #                       Initialize the LLM Client                           #
-llm_client = genai.Client(
-    vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION)
+llm_client = genai.Client(vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION)
 #############################################################################
 
 # Initialize the GenerativeModel with specific system instructions
@@ -64,20 +63,13 @@ Your output should help the next AI component (the Action Agent) understand what
 """
 
 
-book_mappings = {
-    "DnD Basic Rules 2018": {"author": "Wizards of the Coast","year": 2018
-    }
-}
+book_mappings = {"DnD Basic Rules 2018": {"author": "Wizards of the Coast", "year": 2018}}
 
 
 def generate_query_embedding(query):
-    kwargs = {
-        "output_dimensionality": EMBEDDING_DIMENSION
-    }
+    kwargs = {"output_dimensionality": EMBEDDING_DIMENSION}
     response = llm_client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=query,
-        config=types.EmbedContentConfig(**kwargs)
+        model=EMBEDDING_MODEL, contents=query, config=types.EmbedContentConfig(**kwargs)
     )
     return response.embeddings[0].values
 
@@ -87,7 +79,7 @@ def generate_text_embeddings(chunks, dimensionality: int = 256, batch_size=250, 
     all_embeddings = []
 
     for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
+        batch = chunks[i : i + batch_size]
 
         # Retry logic with exponential backoff
         retry_count = 0
@@ -96,24 +88,22 @@ def generate_text_embeddings(chunks, dimensionality: int = 256, batch_size=250, 
                 response = llm_client.models.embed_content(
                     model=EMBEDDING_MODEL,
                     contents=batch,
-                    config=types.EmbedContentConfig(
-                        output_dimensionality=dimensionality),
+                    config=types.EmbedContentConfig(output_dimensionality=dimensionality),
                 )
-                all_embeddings.extend(
-                    [embedding.values for embedding in response.embeddings])
+                all_embeddings.extend([embedding.values for embedding in response.embeddings])
                 break
 
             except errors.APIError as e:
                 retry_count += 1
                 if retry_count > max_retries:
-                    print(
-                        f"Failed to generate embeddings after {max_retries} attempts. Last error: {str(e)}")
+                    print(f"Failed to generate embeddings after {max_retries} attempts. Last error: {str(e)}")
                     raise
 
                 # Calculate delay with exponential backoff
                 wait_time = retry_delay * (2 ** (retry_count - 1))
                 print(
-                    f"API error (code: {e.code}): {e.message}. Retrying in {wait_time} seconds (attempt {retry_count}/{max_retries})...")
+                    f"API error (code: {e.code}): {e.message}. Retrying in {wait_time} seconds (attempt {retry_count}/{max_retries})..."
+                )
                 time.sleep(wait_time)
 
     return all_embeddings
@@ -123,13 +113,10 @@ def load_text_embeddings(df, collection, batch_size=500):
 
     # Generate ids
     df["id"] = df.index.astype(str)
-    hashed_books = df["book"].apply(
-        lambda x: hashlib.sha256(x.encode()).hexdigest()[:16])
+    hashed_books = df["book"].apply(lambda x: hashlib.sha256(x.encode()).hexdigest()[:16])
     df["id"] = hashed_books + "-" + df["id"]
 
-    metadata = {
-        "book": df["book"].tolist()[0]
-    }
+    metadata = {"book": df["book"].tolist()[0]}
     if metadata["book"] in book_mappings:
         book_mapping = book_mappings[metadata["book"]]
         metadata["author"] = book_mapping["author"]
@@ -139,24 +126,18 @@ def load_text_embeddings(df, collection, batch_size=500):
     total_inserted = 0
     for i in range(0, df.shape[0], batch_size):
         # Create a copy of the batch and reset the index
-        batch = df.iloc[i:i+batch_size].copy().reset_index(drop=True)
+        batch = df.iloc[i : i + batch_size].copy().reset_index(drop=True)
 
         ids = batch["id"].tolist()
         documents = batch["chunk"].tolist()
         metadatas = [metadata for item in batch["book"].tolist()]
         embeddings = batch["embedding"].tolist()
 
-        collection.add(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings
-        )
+        collection.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
         total_inserted += len(batch)
         print(f"Inserted {total_inserted} items...")
 
-    print(
-        f"Finished inserting {total_inserted} items into collection '{collection.name}'")
+    print(f"Finished inserting {total_inserted} items into collection '{collection.name}'")
 
 
 def chunk(method="char-split"):
@@ -184,7 +165,8 @@ def chunk(method="char-split"):
             chunk_overlap = 20
             # Init the splitter
             text_splitter = CharacterTextSplitter(
-                chunk_size=chunk_size, chunk_overlap=chunk_overlap, separator='', strip_whitespace=False)
+                chunk_size=chunk_size, chunk_overlap=chunk_overlap, separator="", strip_whitespace=False
+            )
 
             # Perform the splitting
             text_chunks = text_splitter.create_documents([input_text])
@@ -194,8 +176,7 @@ def chunk(method="char-split"):
         elif method == "recursive-split":
             chunk_size = 350
             # Init the splitter
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size)
 
             # Perform the splitting
             text_chunks = text_splitter.create_documents([input_text])
@@ -204,8 +185,7 @@ def chunk(method="char-split"):
 
         elif method == "semantic-split":
             # Init the splitter
-            text_splitter = SemanticChunker(
-                embedding_function=generate_text_embeddings)
+            text_splitter = SemanticChunker(embedding_function=generate_text_embeddings)
             # Perform the splitting
             text_chunks = text_splitter.create_documents([input_text])
 
@@ -219,18 +199,16 @@ def chunk(method="char-split"):
             print("Shape:", data_df.shape)
             print(data_df.head())
 
-            jsonl_filename = os.path.join(
-                OUTPUT_FOLDER, f"chunks-{method}-{book_name}.jsonl")
+            jsonl_filename = os.path.join(OUTPUT_FOLDER, f"chunks-{method}-{book_name}.jsonl")
             with open(jsonl_filename, "w") as json_file:
-                json_file.write(data_df.to_json(orient='records', lines=True))
+                json_file.write(data_df.to_json(orient="records", lines=True))
 
 
 def embed(method="char-split"):
     print("embed()")
 
     # Get the list of chunk files
-    jsonl_files = glob.glob(os.path.join(
-        OUTPUT_FOLDER, f"chunks-{method}-*.jsonl"))
+    jsonl_files = glob.glob(os.path.join(OUTPUT_FOLDER, f"chunks-{method}-*.jsonl"))
     print("Number of files to process:", len(jsonl_files))
 
     # Process
@@ -244,11 +222,9 @@ def embed(method="char-split"):
         chunks = data_df["chunk"].values
         chunks = chunks.tolist()
         if method == "semantic-split":
-            embeddings = generate_text_embeddings(
-                chunks, EMBEDDING_DIMENSION, batch_size=15)
+            embeddings = generate_text_embeddings(chunks, EMBEDDING_DIMENSION, batch_size=15)
         else:
-            embeddings = generate_text_embeddings(
-                chunks, EMBEDDING_DIMENSION, batch_size=100)
+            embeddings = generate_text_embeddings(chunks, EMBEDDING_DIMENSION, batch_size=100)
         data_df["embedding"] = embeddings
 
         time.sleep(5)
@@ -259,7 +235,7 @@ def embed(method="char-split"):
 
         jsonl_filename = jsonl_file.replace("chunks-", "embeddings-")
         with open(jsonl_filename, "w") as json_file:
-            json_file.write(data_df.to_json(orient='records', lines=True))
+            json_file.write(data_df.to_json(orient="records", lines=True))
 
 
 def load(method="char-split"):
@@ -282,14 +258,12 @@ def load(method="char-split"):
     except Exception:
         print(f"Collection '{collection_name}' did not exist. Creating new.")
 
-    collection = client.create_collection(
-        name=collection_name, metadata={"hnsw:space": "cosine"})
+    collection = client.create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
     print(f"Created new empty collection '{collection_name}'")
     print("Collection:", collection)
 
     # Get the list of embedding files
-    jsonl_files = glob.glob(os.path.join(
-        OUTPUT_FOLDER, f"embeddings-{method}-*.jsonl"))
+    jsonl_files = glob.glob(os.path.join(OUTPUT_FOLDER, f"embeddings-{method}-*.jsonl"))
     print("Number of files to process:", len(jsonl_files))
 
     # Process
@@ -353,7 +327,7 @@ def query(method="char-split"):
         query_embeddings=[query_embedding],
         n_results=10,
         where={"book": "DnD Basic Rules 2018"},
-        where_document={"$contains": search_string}
+        where_document={"$contains": search_string},
     )
     print("Query:", query)
     print("\n\nResults:", results)
@@ -375,10 +349,7 @@ def chat(method="char-split"):
     collection = client.get_collection(name=collection_name)
 
     # Query based on embedding value
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=10
-    )
+    results = collection.query(query_embeddings=[query_embedding], n_results=10)
     print("\n\nResults:", results)
 
     print(len(results["documents"][0]))
@@ -389,9 +360,7 @@ def chat(method="char-split"):
 	"""
 
     print("INPUT_PROMPT: ", INPUT_PROMPT)
-    response = llm_client.models.generate_content(
-        model=GENERATIVE_MODEL, contents=INPUT_PROMPT
-    )
+    response = llm_client.models.generate_content(model=GENERATIVE_MODEL, contents=INPUT_PROMPT)
     generated_text = response.text
 
     print("LLM Response:", generated_text)
@@ -409,10 +378,7 @@ def get(method="char-split"):
     collection = client.get_collection(name=collection_name)
 
     # Get documents with filters
-    results = collection.get(
-        where={"book": "DnD Basic Rules 2018"},
-        limit=10
-    )
+    results = collection.get(where={"book": "DnD Basic Rules 2018"}, limit=10)
     print("\n\nResults:", results)
 
 
@@ -443,12 +409,8 @@ def agent(method="char-split"):
             temperature=0,
             system_instruction=SYSTEM_INSTRUCTION,
             tools=[agent_tools.dnd_rule_tool],
-            tool_config=types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(
-                    mode="any"
-                )
-            )
-        )
+            tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="any")),
+        ),
     )
     print("LLM Response:", response)
 
@@ -456,7 +418,8 @@ def agent(method="char-split"):
     function_calls = [part.function_call for part in response.candidates[0].content.parts if part.function_call]
     print("Function calls:", function_calls)
     function_responses = agent_tools.execute_function_calls(
-        function_calls, collection, embed_func=generate_query_embedding)
+        function_calls, collection, embed_func=generate_query_embedding
+    )
     if len(function_responses) == 0:
         print("Function calls did not result in any responses...")
     else:
@@ -466,14 +429,12 @@ def agent(method="char-split"):
             contents=[
                 user_prompt_content,  # User prompt
                 response.candidates[0].content,  # Function call response
-                Content(
-                    parts=function_responses
-                ),
+                Content(parts=function_responses),
             ],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 tools=[agent_tools.dnd_rule_tool],
-            )
+            ),
         )
         print("LLM Response:", response)
 
@@ -543,8 +504,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Chat with LLM Agent",
     )
-    parser.add_argument("--chunk_type", default="char-split",
-                        help="char-split | recursive-split | semantic-split")
+    parser.add_argument("--chunk_type", default="char-split", help="char-split | recursive-split | semantic-split")
 
     args = parser.parse_args()
 

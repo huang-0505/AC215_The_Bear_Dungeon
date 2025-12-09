@@ -36,20 +36,14 @@ class EmbeddingGenerator:
 
     def __init__(self, config: DBConfig):
         self.config = config
-        self.client = genai.Client(
-            vertexai=True,
-            project=config.gcp_project,
-            location=config.gcp_location
-        )
+        self.client = genai.Client(vertexai=True, project=config.gcp_project, location=config.gcp_location)
 
     def generate_single(self, query: str) -> np.ndarray:
         """Generate embedding for a single query string."""
         response = self.client.models.embed_content(
             model=self.config.embedding_model,
             contents=query,
-            config=types.EmbedContentConfig(
-                output_dimensionality=self.config.embedding_dimension
-            ),
+            config=types.EmbedContentConfig(output_dimensionality=self.config.embedding_dimension),
         )
         return np.array(response.embeddings[0].values)
 
@@ -63,8 +57,7 @@ def cosine_similarity(query_emb: np.ndarray, corpus_embs: np.ndarray) -> np.ndar
 
 
 # ========== Convenience Functions ==========
-def retrieve_top_k(query: str, embeddings_file: str = "data/embeddings-actions.jsonl",
-                   k: int = 5) -> List[int]:
+def retrieve_top_k(query: str, embeddings_file: str = "data/embeddings-actions.jsonl", k: int = 5) -> List[int]:
     """
     Convenience function for quick retrieval without config setup.
 
@@ -95,4 +88,4 @@ def retrieve_top_k(query: str, embeddings_file: str = "data/embeddings-actions.j
     # Return top-k IDs
     results = df.iloc[topk_idx].copy()
 
-    return results['id'].tolist()
+    return results["id"].tolist()

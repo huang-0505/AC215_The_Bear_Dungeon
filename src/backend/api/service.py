@@ -3,11 +3,7 @@ from starlette.middleware.cors import CORSMiddleware
 from api.routers import combat
 
 # Setup FastAPI app
-app = FastAPI(
-    title="DnD Combat API",
-    description="Backend API for DnD Combat Simulator",
-    version="v1"
-)
+app = FastAPI(title="DnD Combat API", description="Backend API for DnD Combat Simulator", version="v1")
 
 # Enable CORSMiddleware
 app.add_middleware(

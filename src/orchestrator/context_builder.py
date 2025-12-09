@@ -30,21 +30,15 @@ class GameContextBuilder:
         if not current:
             return {"state_type": "initial"}
 
-        context = {
-            "state_type": current.state_type.value,
-            "recent_actions": [],
-            "metadata": current.metadata
-        }
+        context = {"state_type": current.state_type.value, "recent_actions": [], "metadata": current.metadata}
 
         # Get recent action history
         path = tree.get_path_from_root()
         for node in path[-5:]:  # Last 5 nodes
             if node.player_action:
-                context["recent_actions"].append({
-                    "action": node.player_action,
-                    "response": node.agent_response,
-                    "state_type": node.state_type.value
-                })
+                context["recent_actions"].append(
+                    {"action": node.player_action, "response": node.agent_response, "state_type": node.state_type.value}
+                )
 
         # Add combat-specific context
         if current.state_type == GameStateType.COMBAT:
@@ -68,18 +62,20 @@ class GameContextBuilder:
         context = {
             "current_state": node.state_type.value,
             "applicable_rules": node.applicable_rules,
-            "recent_history": []
+            "recent_history": [],
         }
 
         # Get recent history from tree path
         path = tree.get_path_from_root()
         for hist_node in path[-3:]:  # Last 3 nodes
             if hist_node.agent_response:
-                context["recent_history"].append({
-                    "state_type": hist_node.state_type.value,
-                    "action": hist_node.player_action,
-                    "response": hist_node.agent_response
-                })
+                context["recent_history"].append(
+                    {
+                        "state_type": hist_node.state_type.value,
+                        "action": hist_node.player_action,
+                        "response": hist_node.agent_response,
+                    }
+                )
 
         return context
 

@@ -14,8 +14,17 @@ from typing import List, Optional, Dict
 class Character:
     """Represents a combatant in the battle with stats, HP, and status."""
 
-    def __init__(self, name: str, char_id: int, hp: int, ac: int, attributes: Dict[str, int],
-                 attack_bonus: int, damage: int, role: str = "player"):
+    def __init__(
+        self,
+        name: str,
+        char_id: int,
+        hp: int,
+        ac: int,
+        attributes: Dict[str, int],
+        attack_bonus: int,
+        damage: int,
+        role: str = "player",
+    ):
         self.name = name
         self.id = char_id
         self.hp = hp
@@ -96,7 +105,7 @@ class Action(ABC):
         self.target = target
 
     @abstractmethod
-    def execute(self, engine: 'CombatEngine') -> str:
+    def execute(self, engine: "CombatEngine") -> str:
         """Execute the action and return a descriptive message."""
         pass
 
@@ -105,7 +114,7 @@ class Action(ABC):
 class MeleeAttack(Action):
     """Close-range physical attack."""
 
-    def execute(self, engine: 'CombatEngine') -> str:
+    def execute(self, engine: "CombatEngine") -> str:
         roll = random.randint(1, 20) + self.actor.attack_bonus
         if roll >= self.target.ac:
             dmg = random.randint(1, self.actor.damage) + self.actor.attributes.get("STR", 0)
@@ -118,7 +127,7 @@ class MeleeAttack(Action):
 class RangedAttack(Action):
     """Long-range attack with bow, crossbow, or thrown weapon."""
 
-    def execute(self, engine: 'CombatEngine') -> str:
+    def execute(self, engine: "CombatEngine") -> str:
         roll = random.randint(1, 20) + self.actor.attributes.get("DEX", 0)
         if roll >= self.target.ac:
             dmg = random.randint(1, self.actor.damage)
@@ -135,7 +144,7 @@ class SpellAttack(Action):
         super().__init__(actor, target)
         self.spell_name = spell_name
 
-    def execute(self, engine: 'CombatEngine') -> str:
+    def execute(self, engine: "CombatEngine") -> str:
         spell_dc = 10 + self.actor.attributes.get("INT", 0)
         save_roll = random.randint(1, 20) + self.target.attributes.get("WIS", 0)
         if save_roll < spell_dc:
@@ -149,7 +158,7 @@ class SpellAttack(Action):
 class Heal(Action):
     """Restoration action that recovers HP."""
 
-    def execute(self, engine: 'CombatEngine') -> str:
+    def execute(self, engine: "CombatEngine") -> str:
         heal_amount = random.randint(5, 10) + self.actor.attributes.get("WIS", 0)
         self.target.heal(heal_amount)
         return f"✨ {self.actor.name} heals {self.target.name} for {heal_amount} HP."
@@ -158,7 +167,7 @@ class Heal(Action):
 class Flee(Action):
     """Attempt to escape from battle."""
 
-    def execute(self, engine: 'CombatEngine') -> str:
+    def execute(self, engine: "CombatEngine") -> str:
         chance = random.random()
         if chance > 0.5:
             engine.remove_combatant(self.actor)
@@ -181,7 +190,7 @@ ACTION_REGISTRY: Dict[int, type] = {
 class ActionDispatcher:
     """Resolves actions by mapping action IDs to Action classes."""
 
-    def __init__(self, engine: 'CombatEngine'):
+    def __init__(self, engine: "CombatEngine"):
         self.engine = engine
 
     def resolve_action(self, actor: Character, action_data: Dict) -> str:
