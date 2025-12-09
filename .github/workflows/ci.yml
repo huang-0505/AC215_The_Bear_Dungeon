@@ -166,15 +166,24 @@ jobs:
             -e DEV=1 \
             -e GCP_PROJECT=test-project \
             -e OPENAI_API_KEY=test-key \
+            -e RULE_AGENT_URL=http://localhost:9002 \
+            -e COMBAT_AGENT_URL=http://localhost:9000 \
+            -e NARRATOR_AGENT_URL=http://localhost:9001 \
             -e PYTHONPATH=/app/src/backend:/app/src/rule_agent:/app/src/orchestrator \
             dnd-test-runner:${{ github.sha }} \
-            sh -c "cd /app/src/orchestrator && PYTHONPATH=/app/src/backend:/app/src/rule_agent:/app/src/orchestrator:\$PYTHONPATH uv run --directory /app/tests python -m uvicorn app:app --host 0.0.0.0 --port 9000" || echo "Server container started (may have import errors)"
+            sh -c "cd /app/src/orchestrator && pip install --quiet -r requirements.txt && PYTHONPATH=/app/src/backend:/app/src/rule_agent:/app/src/orchestrator:\$PYTHONPATH python -m uvicorn app:app --host 0.0.0.0 --port 9000" || echo "Server container started (may have import errors)"
 
       - name: Wait for server to be ready
         run: |
           echo "Waiting for server to start..."
           for i in {1..30}; do
-            if curl -f http://localhost:9000/health || curl -f http://localhost:9000/; then
+            # Check if container is still running
+            if ! docker ps | grep -q api-server; then
+              echo "Container stopped! Checking logs..."
+              docker logs api-server || true
+              exit 1
+            fi
+            if curl -f http://localhost:9000/health 2>/dev/null || curl -f http://localhost:9000/ 2>/dev/null; then
               echo "Server is ready!"
               exit 0
             fi
@@ -182,6 +191,8 @@ jobs:
             sleep 2
           done
           echo "Server failed to start within 60 seconds"
+          echo "Container logs:"
+          docker logs api-server || true
           exit 1
 
       - name: Run system tests
