@@ -191,10 +191,41 @@ class TestFullGameFlow:
         assert data["validation_type"] == "sabotage"
 
 
+def is_combat_agent_running(url: str) -> bool:
+    """Check if combat-agent is running (has /combat/start endpoint)."""
+    try:
+        # First check root endpoint to detect service type
+        root_response = requests.get(f"{url}/", timeout=2)
+        if root_response.status_code == 200:
+            data = root_response.json()
+            # Orchestrator returns {"service": "D&D Game Orchestrator", ...}
+            # Combat-agent returns {"message": "Welcome to DnD Combat API"}
+            if "service" in data:
+                service_name = str(data.get("service", "")).lower()
+                if "orchestrator" in service_name:
+                    return False  # It's orchestrator, not combat-agent
+        # Check if /combat/start endpoint exists (combat-agent specific)
+        # This is the definitive test - orchestrator doesn't have this endpoint
+        response = requests.post(f"{url}/combat/start", json={}, timeout=2)
+        # If we get 200, it's definitely combat-agent
+        # If we get 404, it's orchestrator (or combat-agent not running)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        # Network error or endpoint doesn't exist - assume not combat-agent
+        return False
+    except Exception:
+        # Any other error - safer to skip
+        return False
+
+
 @pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(COMBAT_AGENT_URL),
-    reason="Combat Agent not running"
+    reason="Service not running at localhost:9000"
+)
+@pytest.mark.skipif(
+    not is_combat_agent_running(COMBAT_AGENT_URL),
+    reason="Combat Agent not running (orchestrator detected instead). These tests require combat-agent."
 )
 class TestCombatSystemFlow:
     """Test combat-specific system flows."""
