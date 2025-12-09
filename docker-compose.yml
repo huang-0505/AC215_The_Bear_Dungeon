@@ -92,8 +92,6 @@ services:
   chromadb:
     image: chromadb/chroma:latest
     container_name: dnd-chromadb
-    ports:
-      - "8000:8000"
     volumes:
       - ./src/rag/docker-volumes/chromadb:/chroma/chroma
     environment:

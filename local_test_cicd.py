@@ -168,13 +168,16 @@ def run_tests(test_type="all"):
         print("🧪 Running system tests...")
         
         try:
-            # Run tests from host (not in container) since services are on localhost
-            test_cmd = [
-                "python3", "-m", "pytest",
-                "tests/system/",
-                "-v", "--tb=short", "-m", "system"
+            # Run tests in Docker container with --network host to access localhost services
+            cmd = [
+                "docker", "run", "--rm", "--network", "host",
+                "-v", f"{PROJECT_ROOT}:/app",
+                "-w", "/app",
+                f"{IMAGE_NAME}:{IMAGE_TAG}",
+                "uv", "run", "--directory", "/app/tests",
+                "pytest", "/app/tests/system/", "-v", "--tb=short", "-m", "system"
             ]
-            run_command(test_cmd, check=True)
+            run_command(cmd, check=True)
         except subprocess.CalledProcessError:
             print("❌ System tests failed!")
             print("💡 Check service logs: docker-compose logs")
