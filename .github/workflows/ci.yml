@@ -140,7 +140,7 @@ jobs:
           docker run --rm -w /app dnd-test-runner:${{ github.sha }} \
             uv run --directory /app/tests pytest /app/tests/integration/ -v --tb=short -m integration
 
-  # Job 5: Run system tests
+  # Job 5: Run system tests with full docker-compose
   system-tests:
     name: System Tests
     runs-on: ubuntu-latest
@@ -159,62 +159,110 @@ jobs:
         run: |
           docker load -i /tmp/dnd-test-runner.tar
 
-      - name: Start API server container
+      - name: Create secrets directory
         run: |
-          docker run -d --name api-server -p 9000:9000 \
-            -w /app \
-            -e DEV=1 \
-            -e GCP_PROJECT=test-project \
-            -e OPENAI_API_KEY=test-key \
-            -e RULE_AGENT_URL=http://localhost:9002 \
-            -e COMBAT_AGENT_URL=http://localhost:9000 \
-            -e NARRATOR_AGENT_URL=http://localhost:9001 \
-            -e PYTHONPATH=/app/src/backend:/app/src/rule_agent:/app/src/orchestrator \
-            dnd-test-runner:${{ github.sha }} \
-            sh -c "cd /app/src/orchestrator && pip install --quiet -r requirements.txt && PYTHONPATH=/app/src/backend:/app/src/rule_agent:/app/src/orchestrator:\$PYTHONPATH python -m uvicorn app:app --host 0.0.0.0 --port 9000" || echo "Server container started (may have import errors)"
+          mkdir -p secrets
+          echo '{"type": "service_account", "project_id": "test-project"}' > secrets/llm-service-account.json
 
-      - name: Wait for server to be ready
+      - name: Set environment variables for docker-compose
         run: |
-          echo "Waiting for server to start..."
+          echo "GCP_PROJECT=test-project" >> $GITHUB_ENV
+          echo "OPENAI_API_KEY=test-key-placeholder" >> $GITHUB_ENV
+
+      - name: Build and start all services with docker-compose
+        run: |
+          docker-compose up -d
+        env:
+          GCP_PROJECT: test-project
+          OPENAI_API_KEY: test-key-placeholder
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for services to start..."
+
+          # Wait for nginx (main entry point)
           for i in {1..30}; do
-            # Check if container is still running
-            if ! docker ps | grep -q api-server; then
-              echo "Container stopped! Checking logs..."
-              docker logs api-server || true
-              exit 1
+            if curl -f http://localhost:8080/ 2>/dev/null; then
+              echo "Nginx is ready!"
+              break
             fi
-            if curl -f http://localhost:9000/health 2>/dev/null || curl -f http://localhost:9000/ 2>/dev/null; then
-              echo "Server is ready!"
-              exit 0
-            fi
-            echo "Attempt $i/30: Server not ready yet, waiting..."
+            echo "Attempt $i/30: Nginx not ready yet, waiting..."
             sleep 2
           done
-          echo "Server failed to start within 60 seconds"
-          echo "Container logs:"
-          docker logs api-server || true
-          exit 1
+
+          # Wait for orchestrator through nginx
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/api/health 2>/dev/null || curl -f http://localhost:8080/api/ 2>/dev/null; then
+              echo "Orchestrator is ready!"
+              break
+            fi
+            echo "Attempt $i/30: Orchestrator not ready yet, waiting..."
+            sleep 2
+          done
+
+          # Wait for rule-agent
+          for i in {1..30}; do
+            if curl -f http://localhost:9002/health 2>/dev/null || curl -f http://localhost:9002/ 2>/dev/null; then
+              echo "Rule Agent is ready!"
+              break
+            fi
+            echo "Attempt $i/30: Rule Agent not ready yet, waiting..."
+            sleep 2
+          done
+
+          # Wait for combat-agent
+          for i in {1..30}; do
+            if curl -f http://localhost:9000/health 2>/dev/null || curl -f http://localhost:9000/ 2>/dev/null; then
+              echo "Combat Agent is ready!"
+              break
+            fi
+            echo "Attempt $i/30: Combat Agent not ready yet, waiting..."
+            sleep 2
+          done
+
+          # Wait for chromadb
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/api/v1/heartbeat 2>/dev/null; then
+              echo "ChromaDB is ready!"
+              break
+            fi
+            echo "Attempt $i/30: ChromaDB not ready yet, waiting..."
+            sleep 2
+          done
+
+          echo "All services are ready!"
+          docker-compose ps
 
       - name: Run system tests
         run: |
           docker run --rm --network host -w /app dnd-test-runner:${{ github.sha }} \
             uv run --directory /app/tests pytest /app/tests/system/ -v --tb=short -m system
 
-      - name: Show server logs
+      - name: Show service logs
         if: always()
         run: |
-          echo "=== Server Container Logs ==="
-          docker logs api-server || true
-          echo "=== Checking if container is running ==="
-          docker ps -a | grep api-server || true
-          echo "=== Container exit code ==="
-          docker inspect api-server --format='{{.State.ExitCode}}' || true
+          echo "=== Docker Compose Services Status ==="
+          docker-compose ps
+          echo ""
+          echo "=== Nginx Logs ==="
+          docker-compose logs nginx || true
+          echo ""
+          echo "=== Orchestrator (API Gateway) Logs ==="
+          docker-compose logs api-gateway || true
+          echo ""
+          echo "=== Rule Agent Logs ==="
+          docker-compose logs rule-agent || true
+          echo ""
+          echo "=== Combat Agent Logs ==="
+          docker-compose logs combat-agent || true
+          echo ""
+          echo "=== ChromaDB Logs ==="
+          docker-compose logs chromadb || true
 
-      - name: Stop server container
+      - name: Stop all services
         if: always()
         run: |
-          docker stop api-server || true
-          docker rm api-server || true
+          docker-compose down -v
 
   # Job 6: Test Summary
   test-summary:

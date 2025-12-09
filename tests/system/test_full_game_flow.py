@@ -13,7 +13,8 @@ from typing import Optional
 
 
 # Service URLs
-ORCHESTRATOR_URL = "http://localhost:8000"
+# Orchestrator accessed through nginx on port 8080
+ORCHESTRATOR_URL = "http://localhost:8080/api"
 RULE_AGENT_URL = "http://localhost:9002"
 COMBAT_AGENT_URL = "http://localhost:9000"
 CHROMADB_URL = "http://localhost:8000"
@@ -47,11 +48,10 @@ def wait_for_service(url: str, timeout: int = 30, service_name: str = "Service")
 
 
 # Note: These tests require full docker-compose setup with all services
-# They are NOT run in CI - only for local testing
-# @pytest.mark.system  # Removed - these don't run in CI
+@pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(ORCHESTRATOR_URL),
-    reason="Orchestrator not running at localhost:8000"
+    reason="Orchestrator not running - start services with: docker-compose up -d"
 )
 class TestFullGameFlow:
     """Test complete game flow across all services."""
@@ -221,8 +221,7 @@ def is_combat_agent_running(url: str) -> bool:
 
 
 # Note: These tests require combat-agent running (not orchestrator)
-# They are NOT run in CI - only for local testing
-# @pytest.mark.system  # Removed - these don't run in CI
+@pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(COMBAT_AGENT_URL),
     reason="Service not running at localhost:9000"
@@ -313,8 +312,7 @@ class TestCombatSystemFlow:
 
 
 # Note: These tests require rule-agent and ChromaDB running
-# They are NOT run in CI - only for local testing
-# @pytest.mark.system  # Removed - these don't run in CI
+@pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(RULE_AGENT_URL),
     reason="Rule Agent not running"
@@ -404,8 +402,7 @@ class TestRuleAgentSystemFlow:
 
 
 # Note: These tests require full docker-compose setup
-# They are NOT run in CI - only for local testing
-# @pytest.mark.system  # Removed - these don't run in CI
+@pytest.mark.system
 @pytest.mark.slow
 class TestServiceResilience:
     """Test system resilience and error handling."""
