@@ -3,7 +3,7 @@ End-to-end system tests for complete game flow
 Tests all services working together: Orchestrator → Rule Agent → Combat Agent → ChromaDB
 
 IMPORTANT: These tests require all Docker services to be running:
-  docker-compose up -d
+  docker compose up -d
 """
 
 import pytest
@@ -51,7 +51,7 @@ def wait_for_service(url: str, timeout: int = 30, service_name: str = "Service")
 @pytest.mark.system
 @pytest.mark.skipif(
     not is_service_running(ORCHESTRATOR_URL),
-    reason="Orchestrator not running - start services with: docker-compose up -d"
+    reason="Orchestrator not running - start services with: docker compose up -d"
 )
 class TestFullGameFlow:
     """Test complete game flow across all services."""

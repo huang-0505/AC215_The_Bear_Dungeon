@@ -169,9 +169,9 @@ jobs:
           echo "GCP_PROJECT=test-project" >> $GITHUB_ENV
           echo "OPENAI_API_KEY=test-key-placeholder" >> $GITHUB_ENV
 
-      - name: Build and start all services with docker-compose
+      - name: Build and start all services with docker compose
         run: |
-          docker-compose up -d
+          docker compose up -d
         env:
           GCP_PROJECT: test-project
           OPENAI_API_KEY: test-key-placeholder
@@ -231,7 +231,7 @@ jobs:
           done
 
           echo "All services are ready!"
-          docker-compose ps
+          docker compose ps
 
       - name: Run system tests
         run: |
@@ -242,27 +242,27 @@ jobs:
         if: always()
         run: |
           echo "=== Docker Compose Services Status ==="
-          docker-compose ps
+          docker compose ps
           echo ""
           echo "=== Nginx Logs ==="
-          docker-compose logs nginx || true
+          docker compose logs nginx || true
           echo ""
           echo "=== Orchestrator (API Gateway) Logs ==="
-          docker-compose logs api-gateway || true
+          docker compose logs api-gateway || true
           echo ""
           echo "=== Rule Agent Logs ==="
-          docker-compose logs rule-agent || true
+          docker compose logs rule-agent || true
           echo ""
           echo "=== Combat Agent Logs ==="
-          docker-compose logs combat-agent || true
+          docker compose logs combat-agent || true
           echo ""
           echo "=== ChromaDB Logs ==="
-          docker-compose logs chromadb || true
+          docker compose logs chromadb || true
 
       - name: Stop all services
         if: always()
         run: |
-          docker-compose down -v
+          docker compose down -v
 
   # Job 6: Test Summary
   test-summary:
