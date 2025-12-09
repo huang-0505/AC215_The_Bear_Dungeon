@@ -11,21 +11,21 @@ retrieve_dnd_rules_func = types.FunctionDeclaration(
         "Retrieve Dungeons & Dragons rule passages relevant to a user's intent or action. "
         "Search through the embedded rulebook database for mechanics, conditions, or combat rules."
     ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "User action or intent (e.g. 'attack the goblin', 'move 30 feet', 'cast fireball')."
-            },
-            "n_results": {
-                "type": "integer",
-                "description": "Number of relevant rule chunks to retrieve.",
-                "default": 5
-            },
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="User action or intent (e.g. 'attack the goblin', 'move 30 feet', 'cast fireball')."
+            ),
+            "n_results": types.Schema(
+                type=types.Type.INTEGER,
+                description="Number of relevant rule chunks to retrieve.",
+                default=5
+            ),
         },
-        "required": ["query"]
-    },
+        required=["query"]
+    ),
 )
 
 

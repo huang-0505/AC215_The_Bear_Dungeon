@@ -59,13 +59,13 @@ jobs:
       - name: Run Black formatter check
         run: |
           docker run --rm -w /app dnd-test-runner:${{ github.sha }} \
-            uv run --directory /app/tests black --check --line-length 120 src/
+            sh -c "cd /app && uv run --directory /app/tests black --check --line-length 120 src/"
         continue-on-error: false
 
       - name: Run Flake8 linter
         run: |
           docker run --rm -w /app dnd-test-runner:${{ github.sha }} \
-            uv run --directory /app/tests flake8 --max-line-length=120 --extend-ignore=E203,W503,E501 src/
+            sh -c "cd /app && uv run --directory /app/tests flake8 --max-line-length=120 --extend-ignore=E203,W503,E501 src/"
         continue-on-error: true
 
   # Job 3: Run unit tests
@@ -166,8 +166,9 @@ jobs:
             -e DEV=1 \
             -e GCP_PROJECT=test-project \
             -e OPENAI_API_KEY=test-key \
+            -e PYTHONPATH=/app/src/backend:/app/src/rule_agent:/app/src/orchestrator \
             dnd-test-runner:${{ github.sha }} \
-            sh -c "cd /app/src/orchestrator && uv run --directory /app/tests uvicorn app:app --host 0.0.0.0 --port 9000"
+            sh -c "cd /app && uv run --directory /app/tests uvicorn orchestrator.app:app --host 0.0.0.0 --port 9000"
 
       - name: Wait for server to be ready
         run: |
