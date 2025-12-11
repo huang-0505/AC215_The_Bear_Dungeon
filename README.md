@@ -19,6 +19,8 @@
 - 🧠 **Finetuned Narrator LLM** - Custom-trained Gemini model for immersive storytelling
 - 🎯 **Multi-Agent Orchestration** - Intelligent routing between narration, combat, and rule validation
 - 🐳 **Containerized Microservices** - Full Docker-based deployment with Nginx reverse proxy
+- 🛠️ **End-to-End MLOps Pipeline** – Containerized ETL, dataset creation, and Vertex AI fine-tuning workflow enabling fully reproducible model updates
+- 📦 **DVC-Backed Data Versioning** – Deterministic dataset snapshots stored in GCS for auditability, reproducibility, and consistent model lineage
 
 ---
 
@@ -75,6 +77,10 @@ Our system consists of six core microservices:
 - 🐳 Docker & Docker Compose
 - 🌐 Nginx (Reverse Proxy)
 - ☁️ Google Cloud Platform (Vertex AI)
+
+**Model Training & Deployment:**
+- 🤖 Gemini 2.5 Flash Fine-Tuning on Vertex AI Training
+- 🚀 Vertex AI Endpoints for deployment of tuned narrator model
 
 ---
 
@@ -355,9 +361,13 @@ tests/
 │   ├── test_combat_api.py
 │   ├── test_rule_agent.py
 │   └── test_orchestrator.py
-└── system/                  # E2E system tests (~10 tests)
-    ├── test_combat_system.py
-    └── test_full_game_flow.py
+├── system/                  # E2E system tests (~10 tests)
+│   ├── test_combat_system.py
+│   └── test_full_game_flow.py
+│ 
+└── MLOPS/                  # E2E system tests (~10 tests)
+    ├── test_data_versioning.py
+    └── test_mlops_pipeline.py
 ```
 
 ### Continuous Integration
@@ -377,54 +387,81 @@ For detailed testing documentation, see [tests/README.md](tests/README.md).
 ```
 AC215-DnD-Master/
 ├── src/
-│   ├── frontend/              # Next.js React application
-│   │   ├── app/               # App router pages
-│   │   ├── components/        # Reusable UI components
+│   ├── frontend/                   # Next.js React application
+│   │   ├── app/                    # App router pages
+│   │   ├── components/             # Reusable UI components
 │   │   └── Dockerfile
 │   │
-│   ├── orchestrator/          # Main game controller
-│   │   ├── app.py             # FastAPI application
-│   │   ├── game_state.py      # Game state tree manager
-│   │   ├── rule_validator.py  # Rule validation interface
-│   │   └── story_trees/       # Campaign definitions
+│   ├── orchestrator/               # Main game controller
+│   │   ├── app.py                  # FastAPI application
+│   │   ├── game_state.py           # Dynamic campaign tree manager
+│   │   ├── rule_validator.py       # Rule validation interface
+│   │   └── story_trees/            # Campaign definitions
 │   │
-│   ├── backend/               # Combat agent
+│   ├── backend/                    # Deterministic combat agent
 │   │   ├── api/
-│   │   │   ├── service.py     # FastAPI application
-│   │   │   ├── routers/       # API endpoints
+│   │   │   ├── service.py          # FastAPI service
+│   │   │   ├── routers/            # Combat API endpoints
 │   │   │   └── utils/
-│   │   │       ├── combat_engine.py  # D&D 5e combat mechanics
-│   │   │       └── combat_ai.py      # AI enemy behavior
+│   │   │       ├── combat_engine.py    # D&D 5e combat mechanics
+│   │   │       └── combat_ai.py        # Enemy AI logic
 │   │   └── Dockerfile
 │   │
-│   ├── rule_agent/            # RAG-based rule validation
-│   │   ├── app.py             # FastAPI application
-│   │   ├── cli.py             # Database initialization
-│   │   ├── agent_tools.py     # RAG pipeline
-│   │   └── input-datasets/    # D&D rulebooks
+│   ├── rule_agent/                 # RAG-based rule validation
+│   │   ├── app.py                  # FastAPI application
+│   │   ├── cli.py                  # Vector DB initialization
+│   │   ├── agent_tools.py          # RAG pipeline implementation
+│   │   └── input-datasets/         # D&D rulebooks and reference docs
 │   │
-│   ├── finetuning/            # LLM finetuning pipeline
+│   ├── finetuning/                 # LLM finetuning workflow (legacy)
 │   │   └── llm-finetuning/
 │   │       ├── dataset-creator/
 │   │       └── autotrain-runner/
 │   │
+│   ├── data-versioning/            # DVC repository for dataset snapshots
+│   │   ├── data/                   # Versioned datasets
+│   │   ├── data.dvc                # DVC metadata file
+│   │   └── Dockerfile
+│   │
+│   ├── ml-workflow/                # Full MLOps pipeline (core of training system)
+│   │   ├── data-collector/         # Ingest raw story logs and user interactions
+│   │   │   ├── collector.py        # Data ingestion entrypoint
+│   │   │   ├── config.yaml         # Collection configs
+│   │   │   └── Dockerfile
+│   │   │
+│   │   ├── data-processor/         # Data cleaning, EDA, JSONL creation
+│   │   │   ├── processor.py        # Processing pipeline
+│   │   │   ├── processor_config.yaml
+│   │   │   └── Dockerfile
+│   │   │
+│   │   ├── model-training/         # Gemini 2.5 fine-tuning pipeline
+│   │   │   ├── trainer.py          # Submits Vertex AI training jobs
+│   │   │   ├── training_config.yaml
+│   │   │   └── Dockerfile
+│   │   │
+│   │   └── workflow/               # Unified workflow orchestrator
+│   │       ├── workflow.py         # Calls collector → processor → trainer
+│   │       └── config.yaml
+│   │
 │   ├── infra/
-│   │   └── nginx.conf         # Reverse proxy config
+│   │   └── nginx.conf              # Reverse proxy config
 │   │
 │   └── rag/
-│       └── docker-volumes/    # Persistent ChromaDB data
+│       └── docker-volumes/         # Persistent ChromaDB data
 │
-├── tests/                     # Comprehensive test suite
+├── tests/                          # Comprehensive multi-stage test suite
 │   ├── unit/
 │   ├── integration/
 │   └── system/
+│   └── MLOPS/
 │
-├── deployment/                # Cloud deployment configs
-├── figures/                   # Documentation images
-├── notebooks/                 # Jupyter notebooks for analysis
-├── docker-compose.yml         # Multi-service orchestration
-├── .github/workflows/         # CI/CD pipelines
+├── deployment/                     # Cloud deployment configs (GCP, Vertex AI)
+├── figures/                        # Documentation images
+├── notebooks/                      # EDA and model experiment notebooks
+├── docker-compose.yml              # Multi-service orchestration
+├── .github/workflows/              # CI/CD pipelines for linting, tests, builds
 └── README.md
+
 ```
 
 ---
@@ -456,6 +493,13 @@ AC215-DnD-Master/
 - **State Transitions**: Seamless mode changes based on game events
 - **Session Management**: Persistent game state across interactions
 - **Error Resilience**: Graceful degradation when services unavailable
+
+### 🛠️ MLOps Pipeline**
+- **Fully Containerized Workflow:** Data collection, processing, and training packaged into reproducible Docker images
+- **DVC Versioning**: All datasets and training artifacts tracked with deterministic hashes and stored in GCS
+- **Automated Dataset Builder**: ETL pipeline converts gameplay logs into clean, structured JSONL suitable for fine-tuning
+- **Config-Driven Training**: Vertex AI training jobs launched through YAML-defined parameters ensuring consistent runs
+- **Model Lifecycle Management**: Versioned fine-tuned models deployed to Vertex Endpoints with rollback capability
 
 ---
 
@@ -537,6 +581,44 @@ cd src/rule_agent
 
 # Inside container
 uvicorn app:app --reload --host 0.0.0.0 --port 9002
+
+```
+
+#### DVC Development
+```bash
+# Initialize and Configure DVC (first time)
+cd src/data-versioning
+
+## Initialize DVC in this directory
+dvc init
+
+## Add GCS remote
+dvc remote add -d gcs_remote gs://dnd-data-versioning
+
+# Pull Versioned Data
+## Download the latest versioned dataset from GCS
+dvc pull
+
+# Push Updated Data
+## After modifying data/ directory
+dvc add data
+git add data.dvc
+git commit -m "Update dataset"
+
+## Upload tracked dataset to GCS
+dvc push
+
+# Check Dataset Version History
+##  See tracked dataset versions through Git
+git log -- data.dvc
+```
+
+#### MLOps Development
+```bash
+cd src/ml-workflow/workflow
+
+# Run collector → processor → trainer in sequence
+python workflow.py --config config.yaml
 ```
 
 ### Code Quality Tools
