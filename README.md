@@ -4,7 +4,7 @@
 
 ## Overview
 
-**DnD Master AI** is an intelligent, AI-powered Dungeon Master system for *Dungeons & Dragons* 5th Edition adventures. Built as the capstone project for **AC215: MLOps** at Harvard University, this system provides an immersive, interactive tabletop RPG experience powered by state-of-the-art large language models and retrieval-augmented generation.
+**DnD Master AI** is an intelligent, AI-powered Dungeon Master system for *Dungeons & Dragons* adventures. Built as the capstone project for **AC215: MLOps** at Harvard University, this system provides an immersive, interactive tabletop RPG experience powered by state-of-the-art large language models and retrieval-augmented generation.
 
 ### Team Members
 - Shiyu Li
