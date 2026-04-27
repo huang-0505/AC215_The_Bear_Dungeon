@@ -37,38 +37,42 @@ The enhanced orchestrator implements a complete game state management system wit
 
 ## Components
 
-### 1. Game State Tree ([game_state.py](src/orchestrator/game_state.py))
+### 1. Graph State ([graph_state.py](graph_state.py))
 
-**Purpose**: Manages the complete game history as a tree structure.
+**Purpose**: Shared state for the LangGraph state machine. Each node reads
+from and writes to a single `DnDGameState` TypedDict; LangGraph persists
+each invocation's state via the Postgres checkpointer (see
+[graph.py](graph.py)).
 
-**Key Classes**:
-- `GameStateType`: Enum for state types (NARRATION, COMBAT, DIALOGUE, etc.)
-- `AgentType`: Enum for agent types (NARRATOR, COMBAT, ORCHESTRATOR)
-- `GameStateNode`: Individual state with metadata, actions, responses, validation results
-- `GameStateTree`: Tree manager with traversal and transition methods
+**Multiplayer-shaped fields**:
+- `players`: list of `PlayerCharacter` dicts (party of 1..4)
+- `pending_actions`: `player_id -> action text` collected during a round
+- `acting_player_id`: whose turn during initiative-ordered combat
+- `room_id`: when bound to a multiplayer room (room_id == LangGraph thread_id)
 
-**Features**:
-- Full history tracking
-- Parent-child relationships
-- Rule validation storage per node
-- State transition detection
+The synthesized prompt the rule validator and narrator consume lives in
+`player_action`; see [party_actions.py](party_actions.py) for the synthesis
+logic.
 
-**Example**:
-```python
-tree = GameStateTree()
-root = tree.create_root(GameStateType.NARRATION)
-root.narrative_text = "You enter a tavern..."
+### 2. Multiplayer Rooms ([rooms.py](rooms.py))
 
-# Later, when combat triggers
-combat_node = tree.add_child(
-    parent_id=root.id,
-    state_type=GameStateType.COMBAT,
-    agent=AgentType.COMBAT
-)
-tree.transition_to(combat_node.id)
-```
+**Purpose**: Redis-backed lobby + per-round action collection.
 
-### 2. Rule Validator ([rule_validator.py](src/orchestrator/rule_validator.py))
+**Lifecycle**:
+- `lobby` — players gather; only the host can `start`
+- `active` — LangGraph thread exists; players submit actions; resolver
+  invokes the graph when all players have submitted (or after a 30s timeout
+  in narration; immediately when an authorized player submits in combat)
+- `ended` — game over; room is read-only
+
+**Endpoints** (in [app.py](app.py)):
+`POST /rooms`, `GET /rooms`, `GET /rooms/{id}`, `POST /rooms/{id}/join`,
+`POST /rooms/{id}/leave`, `POST /rooms/{id}/start`,
+`POST /rooms/{id}/action`, `GET /rooms/{id}/events` (SSE).
+
+**Redis keys**: see top of `rooms.py`.
+
+### 3. Rule Validator ([rule_validator.py](rule_validator.py))
 
 **Purpose**: Interface to the Rule Agent for D&D rules validation.
 
@@ -89,28 +93,7 @@ tree.transition_to(combat_node.id)
 }
 ```
 
-### 3. Context Builder ([context_builder.py](src/orchestrator/context_builder.py))
-
-**Purpose**: Extract game context from the state tree for validation and agent calls.
-
-**Methods**:
-- `build_context(tree)`: Extract current state, recent actions, combat info
-- `build_agent_context(node, tree)`: Rich context for agent calls
-- `get_story_summary(tree)`: Generate narrative summary
-
-**Context Example**:
-```python
-{
-  "state_type": "combat",
-  "combat_session_id": "uuid-123",
-  "in_combat": true,
-  "recent_actions": [
-    {"action": "I attack the goblin", "response": "You strike..."}
-  ]
-}
-```
-
-### 4. Rule Agent API ([rule_agent/app.py](src/rule_agent/app.py))
+### 4. Rule Agent API ([rule_agent/app.py](../rule_agent/app.py))
 
 **Purpose**: FastAPI wrapper for the D&D RAG system.
 
@@ -185,11 +168,11 @@ End game session.
 ### Starting a Game
 
 ```
-1. Client → POST /game/start
-2. Orchestrator creates GameStateTree with root node
-3. Orchestrator → Narrator Agent: Generate initial story
-4. Orchestrator checks for combat trigger
-5. Orchestrator updates tree and returns response
+1. Client → POST /game/start (or POST /rooms/{id}/start in multiplayer)
+2. Orchestrator builds initial DnDGameState (party, campaign, story tree)
+3. Orchestrator → Narrator Agent: generate initial choices
+4. State seeded into LangGraph thread via Postgres checkpointer
+5. Orchestrator returns initial response + choices
 ```
 
 ### Player Action Flow
@@ -367,10 +350,12 @@ Root (Narration)
 
 ### Adding a New State Type
 
-1. Add to `GameStateType` enum in `game_state.py`
-2. Create handler function in `orchestrator/app.py`
-3. Update routing logic in `game_action()`
-4. Add transition detection if needed
+1. Add the new value to the `state_type` field's allowed strings in
+   [graph_state.py](graph_state.py)
+2. Add a node module under `nodes/` and register it in
+   [graph.py](graph.py)
+3. Update `router_node` to route into the new node when appropriate
+4. Add transition detection (post-node conditional edge) if needed
 
 ### Customizing Rule Validation
 

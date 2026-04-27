@@ -178,7 +178,7 @@ export default function GameInterface() {
           // Add timeout and better error handling
           let stateResponse: Response | null = null
           try {
-            stateResponse = await fetch(`/api/orchestrator/game/state/${savedSessionId}`, {
+            stateResponse = await fetch(`/api/game/state/${savedSessionId}`, {
               signal: AbortSignal.timeout(5000) // 5 second timeout
             })
           } catch (fetchError: any) {

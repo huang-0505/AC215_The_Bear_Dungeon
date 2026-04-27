@@ -412,8 +412,14 @@ AC215-DnD-Master/
 │   │   └── Dockerfile
 │   │
 │   ├── orchestrator/               # Main game controller
-│   │   ├── app.py                  # FastAPI application
-│   │   ├── game_state.py           # Dynamic campaign tree manager
+│   │   ├── app.py                  # FastAPI app + multiplayer room endpoints
+│   │   ├── graph.py                # LangGraph + Postgres checkpointer
+│   │   ├── graph_state.py          # Multiplayer-shaped game state
+│   │   ├── rooms.py                # Redis-backed room manager
+│   │   ├── redis_client.py         # Singleton Redis client
+│   │   ├── party_actions.py        # Multi-player action synthesis
+│   │   ├── models/player.py        # PlayerCharacter dataclass
+│   │   ├── nodes/                  # LangGraph node implementations
 │   │   ├── rule_validator.py       # Rule validation interface
 │   │   └── story_trees/            # Campaign definitions
 │   │

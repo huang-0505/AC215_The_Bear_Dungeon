@@ -3,7 +3,7 @@
 export async function POST(req: Request) {
   try {
     const body = await req.json()
-    const orchestratorUrl = 'http://api-gateway:8000'
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://api-gateway:8000'
 
     const response = await fetch(`${orchestratorUrl}/game/action`, {
       method: 'POST',

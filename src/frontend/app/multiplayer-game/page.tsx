@@ -2,135 +2,255 @@
 
 import type React from "react"
 
-import { useState, useEffect, useRef } from "react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
-import { Card, CardContent } from "@/components/ui/card"
-import { useRoomEvents } from "@/hooks/use-room-events"
-import { Users, Clock, ArrowLeft, CheckCircle, Circle } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
+import { ArrowLeft, CheckCircle, Circle, Clock, Crown, Users } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { useRoomEvents } from "@/hooks/use-room-events"
+
+interface NarrativeEntry {
+  round: number
+  text: string
+}
+
+interface CampaignSummary {
+  id: string
+  name: string
+}
 
 export default function MultiplayerGame() {
-  const [roomId, setRoomId] = useState<string | null>(null)
-  const [playerId, setPlayerId] = useState<string>("")
-  const [playerName, setPlayerName] = useState<string>("")
-  const [characterClass, setCharacterClass] = useState<string>("")
-  const [inputValue, setInputValue] = useState("")
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [isProcessing, setIsProcessing] = useState(false)
-  const { room, isConnected } = useRoomEvents(roomId)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
   const router = useRouter()
+  const params = useSearchParams()
+  const roomIdParam = params.get("roomId")
+  const playerIdParam = params.get("playerId")
 
+  const [roomId, setRoomId] = useState<string | null>(roomIdParam)
+  const [playerId, setPlayerId] = useState<string | null>(playerIdParam)
+
+  const {
+    room,
+    isConnected,
+    submittedPlayerIds,
+    lastResult,
+    isEnded,
+    actingPlayerId,
+    stateType,
+  } = useRoomEvents(roomId)
+
+  const [inputValue, setInputValue] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+  const [narrativeLog, setNarrativeLog] = useState<NarrativeEntry[]>([])
+  const [campaigns, setCampaigns] = useState<CampaignSummary[]>([])
+  const [selectedCampaign, setSelectedCampaign] = useState<string>("")
+  const [starting, setStarting] = useState(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Hydrate identity from localStorage if not in URL. If roomId, playerId,
+  // OR the per-room token can't be resolved, send the user back to the
+  // lobby — otherwise the page would render with null identifiers and
+  // silently mis-attribute every action (or 401 on every submit).
   useEffect(() => {
-    // Get room and player info from localStorage
-    const storedRoomId = localStorage.getItem("roomId")
-    const storedPlayerName = localStorage.getItem("playerName")
-    const storedCharacterClass = localStorage.getItem("selectedCharacterClass")
-    const storedPlayerId = localStorage.getItem("playerId")
+    let nextRoom = roomId
+    if (!nextRoom) {
+      nextRoom = localStorage.getItem("roomId")
+      if (nextRoom) setRoomId(nextRoom)
+    } else {
+      localStorage.setItem("roomId", nextRoom)
+    }
 
-    if (!storedRoomId || !storedPlayerName || !storedCharacterClass) {
+    let nextPlayer = playerId
+    if (!nextPlayer) {
+      nextPlayer = localStorage.getItem("playerId")
+      if (nextPlayer) setPlayerId(nextPlayer)
+    }
+
+    const hasToken =
+      nextRoom !== null && sessionStorage.getItem(`playerToken:${nextRoom}`) !== null
+
+    if (!nextRoom || !nextPlayer || !hasToken) {
+      router.push("/multiplayer")
+    }
+  }, [roomId, playerId, router])
+
+  // Load campaign list once for the host's start dialog.
+  useEffect(() => {
+    let cancelled = false
+    fetch("/api/orchestrator/campaigns")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return
+        const list: CampaignSummary[] = (data.campaigns ?? []).map(
+          (c: { campaign_id?: string; id?: string; name: string }) => ({
+            id: c.campaign_id ?? c.id ?? "",
+            name: c.name,
+          }),
+        )
+        setCampaigns(list.filter((c) => c.id))
+      })
+      .catch(() => {
+        /* campaign list is optional */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Append new narration whenever a round resolves.
+  useEffect(() => {
+    if (!lastResult?.response) return
+    setNarrativeLog((prev) => [
+      ...prev,
+      { round: lastResult.current_round, text: lastResult.response },
+    ])
+    setInputValue("")
+  }, [lastResult])
+
+  // Auto-scroll the narrative log.
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [narrativeLog])
+
+  const isHost = useMemo(
+    () => room && playerId && room.host_player_id === playerId,
+    [room, playerId],
+  )
+
+  const hasSubmitted = useMemo(
+    () => (playerId ? submittedPlayerIds.includes(playerId) : false),
+    [playerId, submittedPlayerIds],
+  )
+
+  const inCombat = stateType === "combat"
+  const isMyCombatTurn = inCombat && actingPlayerId === playerId
+  const actingPlayer = useMemo(
+    () =>
+      room?.players.find((p) => p.player_id === actingPlayerId) ?? null,
+    [room, actingPlayerId],
+  )
+
+  const inputDisabled = isEnded
+    ? true
+    : inCombat
+      ? !isMyCombatTurn || submitting
+      : hasSubmitted || submitting
+
+  const placeholderText = isEnded
+    ? "The adventure has ended."
+    : inCombat
+      ? isMyCombatTurn
+        ? "It's your turn — what do you do?"
+        : actingPlayer
+          ? `Waiting for ${actingPlayer.character_name}'s turn…`
+          : "Waiting for the next combatant…"
+      : hasSubmitted
+        ? "Action submitted! Waiting for other players…"
+        : "What do you do?"
+
+  const startAdventure = async () => {
+    if (!roomId || !playerId) return
+    const token = sessionStorage.getItem(`playerToken:${roomId}`)
+    if (!token) {
+      alert("Missing player token; please rejoin from the lobby")
       router.push("/multiplayer")
       return
     }
-
-    setRoomId(storedRoomId)
-    setPlayerName(storedPlayerName)
-    setCharacterClass(storedCharacterClass)
-    setPlayerId(storedPlayerId || `${storedPlayerName}-${Date.now()}`)
-  }, [router])
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [room?.gameState.messages])
-
-  useEffect(() => {
-    if (room?.gameState.phase === "processing" && !isProcessing) {
-      processTurn()
-    }
-  }, [room?.gameState.phase])
-
-  useEffect(() => {
-    if (room && room.gameState.messages.length === 1 && room.gameState.currentTurn === 0) {
-      // This is a new room, start the first turn
-      const startFirstTurn = async () => {
-        try {
-          await fetch(`/api/rooms/${roomId}/process-turn`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-          })
-        } catch (error) {
-          console.error("[v0] Error starting first turn:", error)
-        }
+    setStarting(true)
+    try {
+      const response = await fetch(`/api/rooms/${roomId}/start`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Player-Token": token,
+        },
+        body: JSON.stringify({
+          player_id: playerId,
+          campaign_id: selectedCampaign || undefined,
+        }),
+      })
+      if (!response.ok) {
+        const error = await response.json()
+        alert(error.detail || "Failed to start adventure")
+        return
       }
-
-      if (room.players.length > 0) {
-        startFirstTurn()
+      const data = await response.json()
+      if (data.response) {
+        setNarrativeLog((prev) => [
+          ...prev,
+          { round: 0, text: data.response },
+        ])
       }
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Error starting adventure", error)
+    } finally {
+      setStarting(false)
     }
-  }, [room, roomId])
+  }
 
-  const submitAction = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!inputValue.trim() || !roomId || !playerId || isSubmitting) return
-
-    setIsSubmitting(true)
+  const submitAction = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!inputValue.trim() || !roomId || !playerId || hasSubmitted) return
+    const token = sessionStorage.getItem(`playerToken:${roomId}`)
+    if (!token) {
+      alert("Missing player token; please rejoin from the lobby")
+      router.push("/multiplayer")
+      return
+    }
+    setSubmitting(true)
     try {
       const response = await fetch(`/api/rooms/${roomId}/action`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          playerId,
-          action: inputValue.trim(),
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Player-Token": token,
+        },
+        body: JSON.stringify({ player_id: playerId, text: inputValue.trim() }),
       })
-
-      if (response.ok) {
-        setInputValue("")
-      }
-    } catch (error) {
-      console.error("[v0] Error submitting action:", error)
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
-  const processTurn = async () => {
-    if (!roomId || isProcessing) return
-
-    setIsProcessing(true)
-    try {
-      const response = await fetch(`/api/rooms/${roomId}/process-turn`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      })
-
       if (!response.ok) {
-        console.error("[v0] Error processing turn:", await response.text())
+        const error = await response.json()
+        alert(error.detail || "Action rejected")
       }
     } catch (error) {
-      console.error("[v0] Error processing turn:", error)
+      // eslint-disable-next-line no-console
+      console.error("Error submitting action", error)
     } finally {
-      setIsProcessing(false)
+      setSubmitting(false)
     }
   }
 
-  const currentPlayer = room?.players.find((p) => p.id === playerId)
-  const allPlayersReady = room?.players.every((p) => p.isReady) || false
-  const waitingForPlayers = room?.players.filter((p) => !p.isReady) || []
+  if (!roomId) {
+    return null
+  }
 
   if (!room) {
     return (
       <div className="h-screen bg-[#1A1A1A] text-gray-100 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-8 h-8 border-2 border-purple-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-400">{isConnected ? "Loading room..." : "Connecting to room..."}</p>
+          <div className="w-8 h-8 border-2 border-purple-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-gray-400">
+            {isConnected ? "Loading room…" : "Connecting to room…"}
+          </p>
         </div>
       </div>
     )
   }
+
+  const partySize = room.players.length
+  const submittedCount = submittedPlayerIds.length
+  const waitingPlayers = room.players.filter(
+    (p) => !submittedPlayerIds.includes(p.player_id),
+  )
 
   return (
     <div className="h-screen bg-[#1A1A1A] text-gray-100 font-mono flex flex-col overflow-hidden">
@@ -154,124 +274,167 @@ export default function MultiplayerGame() {
                 <Users className="w-3 h-3 mr-1" />
                 {room.name}
               </Badge>
-
               <Badge variant="outline" className="border-accent text-accent">
                 <Clock className="w-3 h-3 mr-1" />
-                Turn {room.gameState.currentTurn}
+                Round {room.current_round}
+              </Badge>
+              <Badge
+                className={
+                  room.state === "lobby"
+                    ? "text-yellow-400 bg-yellow-500/20"
+                    : room.state === "active"
+                      ? "text-blue-400 bg-blue-500/20"
+                      : "text-gray-400 bg-gray-500/20"
+                }
+              >
+                {room.state.toUpperCase()}
               </Badge>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"}`}></div>
-            <span className="text-xs text-gray-400">{isConnected ? "Connected" : "Disconnected"}</span>
+            <div
+              className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"}`}
+            />
+            <span className="text-xs text-gray-400">
+              {isConnected ? "Connected" : "Disconnected"}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Players Panel */}
+      {/* Players panel */}
       <div className="border-b border-gray-700 bg-gray-800/50 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-gray-400">Players:</span>
-            <div className="flex gap-2">
-              {room.players.map((player) => (
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-sm text-gray-400">Party:</span>
+            {room.players.map((p) => {
+              const submitted = submittedPlayerIds.includes(p.player_id)
+              const isMe = p.player_id === playerId
+              const host = room.host_player_id === p.player_id
+              return (
                 <Badge
-                  key={player.id}
-                  variant={player.id === playerId ? "default" : "outline"}
+                  key={p.player_id}
+                  variant={isMe ? "default" : "outline"}
                   className={`text-xs flex items-center gap-1 ${
-                    player.isReady ? "border-green-400 text-green-400" : "border-gray-500 text-gray-400"
+                    submitted
+                      ? "border-green-400 text-green-400"
+                      : "border-gray-500 text-gray-400"
                   }`}
                 >
-                  {player.isReady ? <CheckCircle className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
-                  {player.name} ({player.characterClass})
+                  {submitted ? (
+                    <CheckCircle className="w-3 h-3" />
+                  ) : (
+                    <Circle className="w-3 h-3" />
+                  )}
+                  {host && <Crown className="w-3 h-3 text-yellow-400" />}
+                  {p.character_name} ({p.character_class})
                 </Badge>
-              ))}
-            </div>
+              )
+            })}
           </div>
 
-          <Badge
-            className={`${
-              room.gameState.phase === "waiting"
-                ? "text-yellow-400 bg-yellow-500/20"
-                : room.gameState.phase === "collecting-actions"
-                  ? "text-blue-400 bg-blue-500/20"
-                  : room.gameState.phase === "processing"
-                    ? "text-purple-400 bg-purple-500/20"
-                    : "text-green-400 bg-green-500/20"
-            }`}
-          >
-            {room.gameState.phase.replace("-", " ").toUpperCase()}
-          </Badge>
+          {room.state === "active" && (
+            <span className="text-xs text-gray-400">
+              {submittedCount}/{partySize} submitted
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Messages */}
+      {/* Lobby start UI (host only) */}
+      {room.state === "lobby" && (
+        <div className="border-b border-gray-700 bg-yellow-500/10 p-4">
+          {isHost ? (
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-sm text-yellow-400">
+                You are the host. Pick a campaign and start when ready.
+              </span>
+              <Select value={selectedCampaign} onValueChange={setSelectedCampaign}>
+                <SelectTrigger className="w-64 bg-gray-800 border-gray-600">
+                  <SelectValue placeholder="Default sandbox" />
+                </SelectTrigger>
+                <SelectContent>
+                  {campaigns.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button onClick={startAdventure} disabled={starting}>
+                {starting ? "Starting…" : "Start Adventure"}
+              </Button>
+            </div>
+          ) : (
+            <p className="text-sm text-yellow-400">
+              Waiting for the host to start the adventure…
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Narrative log */}
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
-        {room.gameState.messages.map((message, index) => (
+        {narrativeLog.length === 0 && room.state !== "lobby" && (
+          <p className="text-gray-500 text-sm">
+            The DM is preparing your scene…
+          </p>
+        )}
+
+        {narrativeLog.map((entry, index) => (
           <div key={index} className="animate-in fade-in duration-300">
-            {message.author === "ai" ? (
-              <div className="flex gap-3">
-                <span className="text-purple-400 font-bold shrink-0">DM:</span>
-                <p className="text-gray-100 leading-relaxed">{message.text}</p>
-              </div>
-            ) : message.author === "system" ? (
-              <div className="flex gap-3">
-                <span className="text-amber-400 font-bold shrink-0">System:</span>
-                <p className="text-gray-300 leading-relaxed italic">{message.text}</p>
-              </div>
-            ) : (
-              <div className="flex gap-3">
-                <span className="text-cyan-400 font-bold shrink-0">
-                  {room.players.find((p) => p.id === message.playerId)?.name || "Player"}:
-                </span>
-                <p className="text-gray-300 leading-relaxed">{message.text}</p>
-              </div>
-            )}
+            <div className="flex gap-3">
+              <span className="text-purple-400 font-bold shrink-0">
+                DM • R{entry.round}
+              </span>
+              <p className="text-gray-100 leading-relaxed whitespace-pre-wrap">
+                {entry.text}
+              </p>
+            </div>
           </div>
         ))}
 
-        {/* Turn Status */}
-        {room.gameState.phase === "collecting-actions" && (
+        {room.state === "active" && (
           <Card className="border-blue-500/30 bg-blue-500/10">
             <CardContent className="p-4">
-              {allPlayersReady ? (
+              {submittedCount === partySize ? (
                 <div className="text-center">
-                  <p className="text-blue-400 font-semibold mb-2">All players ready!</p>
-                  <p className="text-gray-300 text-sm">The DM is processing your actions...</p>
-                  {isProcessing && (
-                    <div className="flex items-center justify-center gap-2 mt-2">
-                      <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div>
-                      <span className="text-xs text-purple-400">Processing turn...</span>
-                    </div>
-                  )}
+                  <p className="text-blue-400 font-semibold mb-2">
+                    All players ready!
+                  </p>
+                  <p className="text-gray-300 text-sm">
+                    The DM is weaving your actions into the story…
+                  </p>
                 </div>
-              ) : (
+              ) : waitingPlayers.length > 0 ? (
                 <div>
                   <p className="text-blue-400 font-semibold mb-2">
-                    Waiting for {waitingForPlayers.length} player(s) to submit their actions:
+                    Waiting for {waitingPlayers.length} player(s):
                   </p>
-                  <div className="flex gap-2">
-                    {waitingForPlayers.map((player) => (
-                      <Badge key={player.id} variant="outline" className="text-xs">
-                        {player.name}
+                  <div className="flex gap-2 flex-wrap">
+                    {waitingPlayers.map((p) => (
+                      <Badge
+                        key={p.player_id}
+                        variant="outline"
+                        className="text-xs"
+                      >
+                        {p.character_name}
                       </Badge>
                     ))}
                   </div>
                 </div>
-              )}
+              ) : null}
             </CardContent>
           </Card>
         )}
 
-        {room.gameState.phase === "processing" && (
-          <Card className="border-purple-500/30 bg-purple-500/10">
+        {isEnded && (
+          <Card className="border-green-500/30 bg-green-500/10">
             <CardContent className="p-4 text-center">
-              <div className="flex items-center justify-center gap-2 mb-2">
-                <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div>
-                <span className="text-purple-400 font-semibold">DM is weaving your actions into the story...</span>
-              </div>
-              <p className="text-gray-300 text-sm">Please wait while the AI processes all player actions</p>
+              <p className="text-green-400 font-semibold">
+                The adventure has ended.
+              </p>
             </CardContent>
           </Card>
         )}
@@ -279,44 +442,63 @@ export default function MultiplayerGame() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Action Input */}
-      <div className="border-t border-gray-700 bg-[#1A1A1A] p-6">
-        <form onSubmit={submitAction} className="flex gap-3">
-          <Input
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder={
-              currentPlayer?.isReady
-                ? "Action submitted! Waiting for other players..."
-                : room.gameState.phase === "processing"
-                  ? "DM is processing actions..."
-                  : "What do you do?"
-            }
-            className="flex-1 bg-gray-800 border-gray-600 text-gray-100 placeholder-gray-400 font-mono focus:border-purple-400 focus:ring-purple-400/20"
-            disabled={currentPlayer?.isReady || isSubmitting || room.gameState.phase !== "collecting-actions"}
-          />
-          <Button
-            type="submit"
-            disabled={
-              !inputValue.trim() ||
-              currentPlayer?.isReady ||
-              isSubmitting ||
-              room.gameState.phase !== "collecting-actions"
-            }
-            className="bg-purple-600 hover:bg-purple-700 text-white font-mono px-6"
-          >
-            {isSubmitting ? "..." : currentPlayer?.isReady ? "✓" : "Submit"}
-          </Button>
-        </form>
+      {/* Action input */}
+      {room.state === "active" && !isEnded && (
+        <div className="border-t border-gray-700 bg-[#1A1A1A] p-6">
+          {inCombat && (
+            <div className="mb-3 flex items-center gap-2">
+              <Badge
+                className={
+                  isMyCombatTurn
+                    ? "bg-purple-600 text-white"
+                    : "bg-gray-700 text-gray-300"
+                }
+              >
+                {isMyCombatTurn
+                  ? "Your turn"
+                  : actingPlayer
+                    ? `${actingPlayer.character_name}'s turn`
+                    : "Combat in progress"}
+              </Badge>
+            </div>
+          )}
 
-        <p className="text-gray-500 text-xs mt-2 font-mono">
-          {currentPlayer?.isReady
-            ? "Action submitted • Waiting for other players"
-            : room.gameState.phase === "processing"
-              ? "DM is processing all actions • Please wait"
-              : "Submit your action • Turn-based multiplayer"}
-        </p>
-      </div>
+          <form onSubmit={submitAction} className="flex gap-3">
+            <Input
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              placeholder={placeholderText}
+              className="flex-1 bg-gray-800 border-gray-600 text-gray-100 placeholder-gray-400 font-mono focus:border-purple-400 focus:ring-purple-400/20"
+              disabled={inputDisabled}
+            />
+            <Button
+              type="submit"
+              disabled={!inputValue.trim() || inputDisabled}
+              className="bg-purple-600 hover:bg-purple-700 text-white font-mono px-6"
+            >
+              {submitting
+                ? "…"
+                : inCombat
+                  ? isMyCombatTurn
+                    ? "Act"
+                    : "Wait"
+                  : hasSubmitted
+                    ? "✓"
+                    : "Submit"}
+            </Button>
+          </form>
+
+          <p className="text-gray-500 text-xs mt-2 font-mono">
+            {inCombat
+              ? isMyCombatTurn
+                ? "Your turn • Resolve and pass to the next combatant"
+                : "Strict turn order • Wait for the acting combatant"
+              : hasSubmitted
+                ? "Action submitted • Waiting for the rest of the party"
+                : "Submit your action • All players resolve together"}
+          </p>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,61 +1,47 @@
-import type { NextRequest } from "next/server"
-import { roomManager } from "@/lib/multiplayer/room-manager"
-import { roomEventEmitter } from "@/lib/multiplayer/event-emitter"
+import { orchestratorUrl } from "@/lib/orchestrator"
 
-// GET /api/rooms/[roomId]/events - Server-Sent Events for real-time updates
-export async function GET(request: NextRequest, { params }: { params: { roomId: string } }) {
-  const { roomId } = params
+// Stream the orchestrator's SSE response straight through to the client.
+// Next.js Edge runtime is not used because we need to support an indefinite
+// stream from a Node.js fetch.
+export const dynamic = "force-dynamic"
 
-  // Verify room exists
-  const room = roomManager.getRoom(roomId)
-  if (!room) {
-    return new Response("Room not found", { status: 404 })
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export async function GET(
+  request: Request,
+  { params }: { params: { roomId: string } },
+) {
+  if (!UUID_RE.test(params.roomId)) {
+    return new Response(JSON.stringify({ error: "Invalid room ID" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    })
   }
 
-  // Create SSE stream
-  const stream = new ReadableStream({
-    start(controller) {
-      console.log(`[v0] SSE connection opened for room ${roomId}`)
-
-      // Send initial room state
-      const encoder = new TextEncoder()
-      const sendEvent = (data: any) => {
-        const message = `data: ${JSON.stringify(data)}\n\n`
-        controller.enqueue(encoder.encode(message))
-      }
-
-      // Send current room state immediately
-      sendEvent({
-        type: "room-update",
-        room: roomManager.getRoom(roomId),
-      })
-
-      // Subscribe to room updates
-      const unsubscribe = roomEventEmitter.subscribe(roomId, (data) => {
-        sendEvent(data)
-      })
-
-      // Send heartbeat every 30 seconds
-      const heartbeat = setInterval(() => {
-        sendEvent({ type: "heartbeat", timestamp: Date.now() })
-      }, 30000)
-
-      // Cleanup on close
-      request.signal.addEventListener("abort", () => {
-        console.log(`[v0] SSE connection closed for room ${roomId}`)
-        clearInterval(heartbeat)
-        unsubscribe()
-      })
-    },
+  // Forward the client's AbortSignal upstream so closing the browser SSE
+  // connection cancels the in-flight fetch to the orchestrator instead of
+  // leaking the upstream TCP connection.
+  const upstream = await fetch(orchestratorUrl(`/rooms/${params.roomId}/events`), {
+    method: "GET",
+    headers: { Accept: "text/event-stream" },
+    cache: "no-store",
+    signal: request.signal,
   })
 
-  return new Response(stream, {
+  if (!upstream.ok || !upstream.body) {
+    return new Response(
+      JSON.stringify({ error: "Failed to connect to room event stream" }),
+      { status: upstream.status || 502, headers: { "Content-Type": "application/json" } },
+    )
+  }
+
+  return new Response(upstream.body, {
+    status: 200,
     headers: {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Cache-Control",
+      "X-Accel-Buffering": "no",
     },
   })
 }
