@@ -1,75 +1,93 @@
 """
-app.py - Enhanced Orchestrator with Rule Validation and State Management
+app.py - LangGraph-based D&D Game Orchestrator
 
-Orchestrates the D&D game flow with:
-- Rule validation via Rule Agent
-- State tree management
-- Agent routing (Narrator, Combat)
-- State transition detection
+Multiplayer-aware: state.players holds the party (1..4), every action is
+collected per player_id. Solo play is just a 1-player party.
 """
 
 import os
+import json
+import asyncio
 import logging
-from uuid import uuid4
-from typing import Dict, Optional, List
+from contextlib import asynccontextmanager
+from uuid import uuid4, UUID
+from typing import Dict, Optional, List, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from openai import OpenAI
 import requests
-from google import genai
-from google.genai import types
+import redis.asyncio as redis_async
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, field_validator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
-from game_state import GameStateTree, GameStateType, AgentType
-from rule_validator import RuleValidator
-from context_builder import GameContextBuilder
+from rate_limit import (
+    LIMIT_CREATE_ROOM,
+    LIMIT_GAME_ACTION,
+    LIMIT_ROOM_ACTION,
+    LIMIT_SSE_CONNECT,
+    limiter,
+)
+
+from graph import invoke_game_action, get_session_state, get_graph
 from campaign_loader import CampaignLoader
-from story_tree_loader import StoryTreeLoader, StoryTree
+from story_tree_loader import StoryTreeLoader
+from nodes.narrator_node import generate_initial_choices
+from redis_client import get_redis
+from models.player import PlayerCharacter
+from party_actions import synthesize_party_action
+from rooms import (
+    RoomManager,
+    RoomError,
+    Room,
+    MAX_PARTY_SIZE as ROOM_MAX_PARTY_SIZE,
+    ROOM_STATE_LOBBY,
+    ROOM_STATE_ACTIVE,
+    events_channel,
+)
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY not set. OpenAI features may not work.")
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+MAX_PARTY_SIZE = 4
 
-# Initialize Vertex AI for narrator agent
-GCP_PROJECT = os.getenv("GCP_PROJECT")
-GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
-NARRATOR_ENDPOINT_ID = os.getenv("NARRATOR_ENDPOINT_ID", "5165249441082376192")
+# Single async Redis client shared by every SSE subscriber so we don't open
+# a new TCP connection per browser. Initialized lazily inside the lifespan.
+_async_redis: Optional[redis_async.Redis] = None
 
-if not GCP_PROJECT:
-    logger.warning("GCP_PROJECT not set. Vertex AI narrator features may not work.")
-    NARRATOR_ENDPOINT = None
-    llm_client = None
-else:
-    NARRATOR_ENDPOINT = f"projects/{GCP_PROJECT}/locations/{GCP_LOCATION}/endpoints/{NARRATOR_ENDPOINT_ID}"
-    # Initialize GenAI client for narrator
+
+@asynccontextmanager
+async def lifespan(app_inst: FastAPI):
+    """Construct shared async resources at startup and release them on shutdown."""
+    global _async_redis
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    _async_redis = redis_async.from_url(redis_url, decode_responses=True)
     try:
-        llm_client = genai.Client(vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION)
-    except Exception as e:
-        logger.error(f"Failed to initialize GenAI client: {str(e)}")
-        llm_client = None
+        yield
+    finally:
+        if _async_redis is not None:
+            await _async_redis.aclose()
+            _async_redis = None
+        # Close the Postgres pool created lazily inside graph.py so SIGTERM
+        # doesn't leak ~20 idle connections on every container restart.
+        from graph import _pool as _graph_pool  # local import to avoid cycle
+        if _graph_pool is not None:
+            _graph_pool.close()
 
-# Configuration for narrator generation
-narrator_generation_config = types.GenerateContentConfig(
-    max_output_tokens=8192,  # Maximum allowed for Gemini models
-    temperature=0.8,
-    top_p=0.95,
-)
 
-# Initialize FastAPI
 app = FastAPI(
-    title="D&D Game Orchestrator",
-    description="Orchestrates game flow with rule validation and state management",
-    version="2.0",
+    title="D&D Game Orchestrator (LangGraph)",
+    description="Orchestrates game flow with LangGraph StateGraph, shared state, and Postgres-backed checkpointer persistence",
+    version="3.1",
+    lifespan=lifespan,
 )
 
-# Enable CORS
+# Rate limiter: backed by Redis (see rate_limit.py). Default 100/min/IP +
+# tighter per-route caps applied via @limiter.limit on hot handlers.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=False,
@@ -78,29 +96,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Service URLs
-RULE_AGENT_URL = os.getenv("RULE_AGENT_URL", "http://localhost:9002")
-NARRATOR_AGENT_URL = os.getenv("NARRATOR_AGENT_URL", "http://localhost:9001")
 COMBAT_AGENT_URL = os.getenv("COMBAT_AGENT_URL", "http://localhost:9000")
+ACTIVE_SESSIONS_KEY = "sessions:active"
 
-# Initialize services
-rule_validator = RuleValidator(rule_agent_url=RULE_AGENT_URL)
-context_builder = GameContextBuilder()
 
-# In-memory session storage (use Redis in production)
-game_sessions: Dict[str, GameStateTree] = {}
+def _register_session(session_id: str, metadata: dict) -> None:
+    get_redis().hset(ACTIVE_SESSIONS_KEY, session_id, json.dumps(metadata))
 
-# Story tree storage (maps session_id to StoryTree)
-story_trees: Dict[str, StoryTree] = {}
 
-# Current story node tracking (maps session_id to current node_id in story tree)
-current_story_nodes: Dict[str, str] = {}
+def _unregister_session(session_id: str) -> bool:
+    return bool(get_redis().hdel(ACTIVE_SESSIONS_KEY, session_id))
+
+
+def _active_session_count() -> int:
+    return int(get_redis().hlen(ACTIVE_SESSIONS_KEY))
 
 
 # ========== Pydantic Models ==========
+def _require_uuid(value: str) -> str:
+    """Raise ValueError if `value` is not a UUID-shaped string."""
+    try:
+        UUID(value)
+    except ValueError:
+        raise ValueError("must be a valid UUID")
+    return value
+
+
+class PlayerInput(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    character_class: str = Field(min_length=1, max_length=50)
+    character_name: str = Field(min_length=1, max_length=100)
+    player_id: Optional[str] = None  # server-assigned if not provided
+
+    @field_validator("player_id")
+    @classmethod
+    def _check_player_id(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _require_uuid(v)
+
+
 class UserInput(BaseModel):
     text: str
     session_id: Optional[str] = None
+    player_id: Optional[str] = None  # required when party size > 1
+
+    @field_validator("text")
+    @classmethod
+    def validate_text_length(cls, v: str) -> str:
+        if len(v) > 2000:
+            raise ValueError("Action text must be 2000 characters or less")
+        return v
+
+    @field_validator("session_id", "player_id")
+    @classmethod
+    def _check_uuids(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _require_uuid(v)
 
 
 class CombatActionRequest(BaseModel):
@@ -108,1513 +157,954 @@ class CombatActionRequest(BaseModel):
 
 
 class GameStartRequest(BaseModel):
-    campaign_id: Optional[str] = None  # e.g., "stormwreck-isle"
-    character_class: Optional[str] = None  # e.g., "Fighter"
-    character_name: Optional[str] = None  # e.g., "Aragorn"
-    initial_prompt: Optional[str] = None  # Custom prompt (overrides campaign)
-    max_combats: Optional[int] = 5  # Game ends after this many combats (default: 5)
-    combat_rounds: Optional[List[int]] = None  # Rounds where combat is forced (default: [3, 10, 15])
+    campaign_id: Optional[str] = None
+    # Solo path (legacy):
+    character_class: Optional[str] = None
+    character_name: Optional[str] = None
+    # Multiplayer path:
+    players: Optional[List[PlayerInput]] = None
+    initial_prompt: Optional[str] = None
+    max_combats: Optional[int] = 5
+    combat_rounds: Optional[List[int]] = None
+
+    @field_validator("players")
+    @classmethod
+    def validate_party_size(cls, v: Optional[List[PlayerInput]]) -> Optional[List[PlayerInput]]:
+        if v is not None and len(v) > MAX_PARTY_SIZE:
+            raise ValueError(f"Party size cannot exceed {MAX_PARTY_SIZE}")
+        return v
 
 
-class GameStateResponse(BaseModel):
-    session_id: str
-    state_type: str
-    agent_used: str
-    response: str
-    validation: Optional[Dict] = None
-    state_node: Dict
-    transition: Optional[str] = None
-    choices: Optional[List[str]] = None  # Tree-structure mode: suggested choices
-
-
-# ========== Helper Functions ==========
-def detect_combat_trigger(text: str) -> bool:
-    """Use LLM to detect if narrative indicates combat start"""
-    if not client:
-        logger.warning("OpenAI client not available, cannot detect combat trigger")
-        return False
-    prompt = f"""
-    Analyze this D&D narrative text and determine if it describes the START of a combat encounter.
-    Look for phrases like:
-    - "enemies appear", "ambush", "attack", "roll for initiative"
-    - Monster/enemy descriptions appearing
-    - Hostile NPCs engaging
-    - "You are attacked"
-
-    Text: "{text}"
-
-    Answer with only "YES" or "NO".
-    """
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], temperature=0
-        )
-        return "yes" in response.choices[0].message.content.lower()
-    except Exception as e:
-        logger.error(f"Error detecting combat trigger: {str(e)}")
-        return False
-
-
-def detect_combat_end(combat_state: Dict) -> bool:
-    """Check if combat has ended based on combat state"""
-    return combat_state.get("battle_over", False)
-
-
-# ========== Agent Communication ==========
-def call_narrator_agent(
-    user_input: str,
-    rules_context: Optional[str] = None,
-    generate_choices: bool = True,
-    story_context: Optional[str] = None,
-) -> Dict:
-    """Call the narrator agent (finetuned Gemini model on Vertex AI)"""
-    try:
-        if not llm_client or not NARRATOR_ENDPOINT:
-            logger.warning("Narrator agent not available (missing GCP configuration), using fallback")
-            return {
-                "agent": "narrator",
-                "result": f"You attempt: {user_input}. The story continues, but the narrator is temporarily unavailable.",
-                "choices": None,
-            }
-
-        logger.info(f"Calling narrator agent with input: {user_input}")
-
-        # Build the prompt for the finetuned narrator
-        prompt_parts = []
-
-        # Include story context if provided (maintains continuity with game history)
-        if story_context:
-            prompt_parts.append(f"Story Context (what happened before in this adventure):\n{story_context}\n")
-
-        prompt_parts.append(f"Player action: {user_input}\n\nNarrate the outcome:")
-
-        if rules_context:
-            # Insert rules context before "Narrate the outcome"
-            prompt_parts.insert(-1, f"Relevant D&D rules:\n{rules_context}\n")
-
-        if generate_choices:
-            prompt_parts.append(
-                "\n\nAfter your narration, provide 3-4 suggested action choices for the player. Format choices as:\nCHOICES:\n1. [choice 1]\n2. [choice 2]\n3. [choice 3]"
+def _resolve_party(request: GameStartRequest) -> list[PlayerCharacter]:
+    """Build the party from either the multiplayer `players` list or the solo
+    character_class/character_name pair. Always returns at least one PC."""
+    if request.players:
+        return [
+            PlayerCharacter.from_class(
+                character_class=p.character_class,
+                character_name=p.character_name,
+                name=p.name,
+                player_id=p.player_id,
             )
+            for p in request.players
+        ]
 
-        prompt = "\n".join(prompt_parts)
-
-        # Call the finetuned model endpoint using genai client
-        logger.info(f"Calling Vertex AI model: {NARRATOR_ENDPOINT}")
-        logger.debug(f"Prompt length: {len(prompt)} characters")
-
-        response = llm_client.models.generate_content(
-            model=NARRATOR_ENDPOINT,
-            contents=prompt,
-            config=narrator_generation_config,
-        )
-
-        # Log response details for debugging
-        logger.info(f"Narrator response received. Type: {type(response)}")
-        logger.debug(f"Response object: {response}")
-
-        # Extract the narrative from response - check multiple possible attributes
-        result = None
-        if hasattr(response, "text") and response.text:
-            result = response.text
-            logger.info(f"Narrator response.text found ({len(result)} chars)")
-        elif hasattr(response, "candidates") and response.candidates:
-            # Try to extract from candidates if text is not directly available
-            candidate = response.candidates[0]
-            if hasattr(candidate, "content") and candidate.content:
-                if hasattr(candidate.content, "parts"):
-                    text_parts = [part.text for part in candidate.content.parts if hasattr(part, "text") and part.text]
-                    if text_parts:
-                        result = " ".join(text_parts)
-                        logger.info(f"Narrator response extracted from candidates ({len(result)} chars)")
-        elif hasattr(response, "content") and response.content:
-            if hasattr(response.content, "parts"):
-                text_parts = [part.text for part in response.content.parts if hasattr(part, "text") and part.text]
-                if text_parts:
-                    result = " ".join(text_parts)
-                    logger.info(f"Narrator response extracted from content.parts ({len(result)} chars)")
-
-        # Check for safety filters or blocked content
-        if hasattr(response, "candidates") and response.candidates:
-            candidate = response.candidates[0]
-            if hasattr(candidate, "finish_reason"):
-                finish_reason = candidate.finish_reason
-                logger.info(f"Narrator response finish_reason: {finish_reason}")
-                # Check if content was blocked (finish_reason values: 1=STOP, 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER)
-                if finish_reason == 3:  # SAFETY filter blocked
-                    logger.error("Narrator response blocked by safety filters!")
-                    if hasattr(candidate, "safety_ratings"):
-                        logger.error(f"Safety ratings: {candidate.safety_ratings}")
-                    result = "The narrator's words are caught by ancient protective wards. Try rephrasing your action."
-                elif finish_reason == 2:  # MAX_TOKENS
-                    logger.warning("Narrator response truncated due to token limit")
-                elif finish_reason not in [1, None]:  # Not normal completion
-                    logger.warning(f"Narrator response may be incomplete. Finish reason: {finish_reason}")
-
-        # Fallback if no text found
-        if not result:
-            logger.error(
-                "Narrator response.text is empty or None. Response structure may have changed or content was blocked."
-            )
-            logger.error(
-                f"Response type: {type(response)}, Response attributes: {[attr for attr in dir(response) if not attr.startswith('_')]}"
-            )
-            if hasattr(response, "candidates") and response.candidates:
-                logger.error(f"Candidate details: {response.candidates[0] if response.candidates else 'No candidates'}")
-            result = "The mists of magic obscure the tale... The narrator seems unable to respond. Please try again."
-
-        # Extract choices if present
-        choices = extract_choices_from_text(result)
-        if choices:
-            # Remove choices section from narrative
-            result = remove_choices_from_text(result)
-
-        return {"agent": "narrator", "result": result, "choices": choices}
-
-    except Exception as e:
-        logger.error(f"Error calling narrator agent: {str(e)}")
-        logger.error(f"Exception type: {type(e).__name__}")
-        import traceback
-
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return {"agent": "narrator", "result": f"Narrator error: {str(e)}. Please try again.", "choices": None}
-
-
-def extract_choices_from_text(text: str) -> Optional[List[str]]:
-    """Extract choice options from narrator response"""
-    import re
-
-    # Look for CHOICES: section
-    choices_match = re.search(r"CHOICES:\s*\n((?:\d+\.\s*[^\n]+\n?)+)", text, re.IGNORECASE | re.MULTILINE)
-    if choices_match:
-        choices_text = choices_match.group(1)
-        # Extract individual choices
-        choices = re.findall(r"\d+\.\s*(.+?)(?=\n\d+\.|\n*$)", choices_text, re.MULTILINE)
-        choices = [choice.strip() for choice in choices if choice.strip()]
-        if choices:
-            return choices
-
-    # Fallback: Use LLM to extract choices if format not found
-    try:
-        if not client:
-            logger.warning("OpenAI client not available, cannot extract choices")
-            return None
-        prompt = f"""
-        Extract 3-4 suggested action choices from this D&D narrative text.
-        Return a JSON object with a "choices" key containing an array of strings.
-        
-        Text: {text}
-        
-        Example format: {{"choices": ["Investigate the door", "Search for traps", "Try to pick the lock"]}}
-        """
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-        )
-        import json
-
-        result = json.loads(response.choices[0].message.content)
-        # Handle both {"choices": [...]} and direct array formats
-        if isinstance(result, list):
-            return result[:4]  # Limit to 4 choices
-        elif "choices" in result and isinstance(result["choices"], list):
-            return result["choices"][:4]  # Limit to 4 choices
-    except Exception as e:
-        logger.warning(f"Failed to extract choices with LLM: {str(e)}")
-
-    return None
-
-
-def remove_choices_from_text(text: str) -> str:
-    """Remove the CHOICES section from narrative text"""
-    import re
-
-    # Remove CHOICES: section
-    text = re.sub(r"CHOICES:\s*\n((?:\d+\.\s*[^\n]+\n?)+)", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    return text.strip()
-
-
-def get_player_stats_by_class(character_class: Optional[str]) -> Dict:
-    """Get player stats based on character class choice"""
-    class_stats = {
-        "Fighter": {
-            "name": "Fighter",
-            "hp": 20,
-            "ac": 18,
-            "attributes": {"STR": 4, "DEX": 2, "INT": 1},
-            "attack_bonus": 7,
-            "damage": 15,
-        },
-        "Wizard": {
-            "name": "Wizard",
-            "hp": 14,
-            "ac": 12,
-            "attributes": {"STR": 1, "DEX": 2, "INT": 5},
-            "attack_bonus": 3,
-            "damage": 12,
-        },
-        "Ranger": {
-            "name": "Ranger",
-            "hp": 16,
-            "ac": 15,
-            "attributes": {"STR": 3, "DEX": 4, "INT": 2},
-            "attack_bonus": 6,
-            "damage": 10,
-        },
-        "Cleric": {
-            "name": "Cleric",
-            "hp": 15,
-            "ac": 16,
-            "attributes": {"STR": 2, "DEX": 2, "INT": 4},
-            "attack_bonus": 4,
-            "damage": 8,
-        },
-        "Barbarian": {
-            "name": "Barbarian",
-            "hp": 26,
-            "ac": 14,
-            "attributes": {"STR": 5, "DEX": 3, "INT": 1},
-            "attack_bonus": 8,
-            "damage": 18,
-        },
-        "Rogue": {
-            "name": "Rogue",
-            "hp": 14,
-            "ac": 15,
-            "attributes": {"STR": 2, "DEX": 5, "INT": 3},
-            "attack_bonus": 5,
-            "damage": 9,
-        },
-    }
-    return class_stats.get(character_class or "Fighter", class_stats["Fighter"])
-
-
-def get_enemy_pool() -> List[List[Dict]]:
-    """Define enemy pools for different combat encounters"""
     return [
-        # Combat 1: Early game - weak enemies
-        [
-            {
-                "name": "Goblin",
-                "hp": 12,
-                "ac": 13,
-                "attributes": {"DEX": 3},
-                "attack_bonus": 3,
-                "damage": 6,
-                "role": "enemy",
-            },
-            {
-                "name": "Kobold",
-                "hp": 8,
-                "ac": 12,
-                "attributes": {"DEX": 2},
-                "attack_bonus": 2,
-                "damage": 4,
-                "role": "enemy",
-            },
-            {
-                "name": "Orc",
-                "hp": 15,
-                "ac": 13,
-                "attributes": {"STR": 3},
-                "attack_bonus": 4,
-                "damage": 7,
-                "role": "enemy",
-            },
-        ],
-        # Combat 2: Mid-early game - moderate enemies
-        [
-            {
-                "name": "Hobgoblin",
-                "hp": 18,
-                "ac": 15,
-                "attributes": {"STR": 3, "DEX": 2},
-                "attack_bonus": 5,
-                "damage": 8,
-                "role": "enemy",
-            },
-            {
-                "name": "Gnoll",
-                "hp": 16,
-                "ac": 14,
-                "attributes": {"STR": 3, "DEX": 1},
-                "attack_bonus": 4,
-                "damage": 7,
-                "role": "enemy",
-            },
-            {
-                "name": "Bugbear",
-                "hp": 20,
-                "ac": 14,
-                "attributes": {"STR": 4, "DEX": 2},
-                "attack_bonus": 5,
-                "damage": 9,
-                "role": "enemy",
-            },
-        ],
-        # Combat 3: Mid game - stronger enemies
-        [
-            {
-                "name": "Troll",
-                "hp": 16,
-                "ac": 13,
-                "attributes": {"STR": 4, "DEX": 2},
-                "attack_bonus": 5,
-                "damage": 8,
-                "role": "enemy",
-            },
-            {
-                "name": "Ogre",
-                "hp": 22,
-                "ac": 13,
-                "attributes": {"STR": 5, "DEX": 1},
-                "attack_bonus": 6,
-                "damage": 10,
-                "role": "enemy",
-            },
-            {
-                "name": "Ettin",
-                "hp": 20,
-                "ac": 14,
-                "attributes": {"STR": 5, "DEX": 1},
-                "attack_bonus": 6,
-                "damage": 11,
-                "role": "enemy",
-            },
-        ],
-        # Combat 4: Late game - very strong enemies
-        [
-            {
-                "name": "Minotaur",
-                "hp": 24,
-                "ac": 16,
-                "attributes": {"STR": 5, "DEX": 2},
-                "attack_bonus": 7,
-                "damage": 12,
-                "role": "enemy",
-            },
-            {
-                "name": "Chimera",
-                "hp": 20,
-                "ac": 17,
-                "attributes": {"STR": 5, "DEX": 3, "INT": 2},
-                "attack_bonus": 7,
-                "damage": 13,
-                "role": "enemy",
-            },
-            {
-                "name": "Wyvern",
-                "hp": 18,
-                "ac": 18,
-                "attributes": {"STR": 5, "DEX": 4},
-                "attack_bonus": 8,
-                "damage": 14,
-                "role": "enemy",
-            },
-        ],
-        # Combat 5: Final boss - legendary enemies
-        [
-            {
-                "name": "Dragon",
-                "hp": 20,
-                "ac": 20,
-                "attributes": {"STR": 6, "DEX": 6, "INT": 6},
-                "attack_bonus": 8,
-                "damage": 12,
-                "role": "enemy",
-            },
-            {
-                "name": "Lich",
-                "hp": 18,
-                "ac": 19,
-                "attributes": {"STR": 3, "DEX": 3, "INT": 7},
-                "attack_bonus": 7,
-                "damage": 15,
-                "role": "enemy",
-            },
-            {
-                "name": "Balor",
-                "hp": 22,
-                "ac": 20,
-                "attributes": {"STR": 7, "DEX": 5, "INT": 4},
-                "attack_bonus": 9,
-                "damage": 16,
-                "role": "enemy",
-            },
-        ],
+        PlayerCharacter.from_class(
+            character_class=request.character_class or "Fighter",
+            character_name=request.character_name or "Adventurer",
+            name=request.character_name or "Adventurer",
+        )
     ]
 
 
-def select_enemies_for_combat(combat_count: int) -> List[Dict]:
-    """Select enemies from the pool based on combat count (1-indexed)"""
-    enemy_pools = get_enemy_pool()
-
-    # Use combat_count - 1 for 0-indexed array (combat_count starts at 1)
-    # If combat_count exceeds available pools, use the last (hardest) pool
-    pool_index = min(combat_count - 1, len(enemy_pools) - 1)
-
-    selected_enemies = enemy_pools[pool_index]
-    logger.info(
-        f"Combat {combat_count}: Selected enemy pool {pool_index + 1} with {len(selected_enemies)} enemies: {[e['name'] for e in selected_enemies]}"
-    )
-
-    return selected_enemies
-
-
-def call_combat_agent_start(
-    rules_context: Optional[str] = None, character_class: Optional[str] = None, combat_count: int = 1
-) -> Dict:
-    """Start a new combat session with character-based player stats and enemies from pool"""
-    try:
-        # Get player stats based on character class
-        player_stats = get_player_stats_by_class(character_class)
-
-        # Select enemies from pool based on combat count
-        enemies = select_enemies_for_combat(combat_count)
-
-        # Create request with player and fixed enemies
-        request_data = {"players": [player_stats], "enemies": enemies}
-
-        logger.info(
-            f"Starting combat with player: {player_stats['name']} (HP: {player_stats['hp']}, AC: {player_stats['ac']})"
-        )
-
-        response = requests.post(f"{COMBAT_AGENT_URL}/combat/start", json=request_data, timeout=10)
-        response.raise_for_status()
-        result = response.json()
-        logger.info(f"Combat started successfully with session_id: {result.get('session_id')}")
-        return result
-    except Exception as e:
-        logger.error(f"Error starting combat: {str(e)}")
-        return {
-            "session_id": str(uuid4()),
-            "message": "⚔️ Combat begins! (Combat agent unavailable)",
-            "state": {"battle_over": False},
-        }
-
-
-def get_combat_state_direct(combat_session_id: str) -> Optional[Dict]:
-    """Get combat state directly from combat agent without sending an action"""
-    try:
-        response = requests.get(f"{COMBAT_AGENT_URL}/combat/state/{combat_session_id}", timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logger.error(f"Error getting combat state directly: {str(e)}")
-        return None
-
-
-def call_combat_agent_action(session_id: str, action: str, rules_context: Optional[str] = None) -> Dict:
-    """Submit an action to the combat agent"""
-    try:
-        response = requests.post(
-            f"{COMBAT_AGENT_URL}/combat/action/{session_id}",
-            json={"action": action},
-            timeout=15,  # Increased to 15 seconds to account for GenAI processing (3s timeout + buffer)
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        # If battle is already over, check state instead
-        if e.response and e.response.status_code == 400:
-            logger.info(f"Combat action failed (likely battle over), checking state...")
-            try:
-                state_data = get_combat_state_direct(session_id)
-                if state_data and state_data.get("battle_over"):
-                    return {"narrative": "The battle has ended!", "raw_result": "Battle over", "state": state_data}
-            except:
-                pass
-        logger.error(f"Error in combat action: {str(e)}")
-        return {
-            "narrative": f"Combat action error: {str(e)}",
-            "raw_result": "",
-            "state": {"battle_over": True, "winner": "unknown"},
-        }
-    except Exception as e:
-        logger.error(f"Error in combat action: {str(e)}")
-        return {
-            "narrative": f"Combat action error: {str(e)}",
-            "raw_result": "",
-            "state": {"battle_over": True, "winner": "unknown"},
-        }
-
-
-# ========== State Handlers ==========
-def handle_narration_action(
-    tree: GameStateTree, current_node, data: UserInput, validation: Dict, session_id: str
-) -> Dict:
-    """Handle action during narration state"""
-
-    # Increment narration round
-    tree.increment_narration_round()
-
-    # Check for round-based combat trigger FIRST (before processing action)
-    if tree.should_trigger_combat() and tree.combat_count < tree.max_combats:
-        logger.info(f"Combat forced at round {tree.narration_round}")
-
-        combat_node = tree.add_child(
-            parent_id=current_node.id,
-            state_type=GameStateType.COMBAT,
-            agent=AgentType.COMBAT,
-            metadata={
-                "trigger": "round_based",
-                "narration_round": tree.narration_round,
-                "trigger_rules": validation.get("rule_text"),
-            },
-        )
-
-        # Get character class from game tree metadata
-        root_node = tree.get_node(tree.root_id) if tree.root_id else None
-        character_class = root_node.metadata.get("character_class") if root_node else None
-
-        # Start combat with rules context and character class
-        # Use combat_count + 1 because we're about to start a new combat
-        combat_start = call_combat_agent_start(
-            rules_context=validation.get("rule_text"),
-            character_class=character_class,
-            combat_count=tree.combat_count + 1,
-        )
-        combat_node.combat_session_id = combat_start["session_id"]
-        combat_node.agent_response = combat_start.get("message", "⚔️ Combat begins!")
-
-        tree.transition_to(combat_node.id)
-
-        return {
-            "session_id": session_id,
-            "state_type": "combat",
-            "agent_used": "combat",
-            "response": f"⚔️ **Combat Encounter at Round {tree.narration_round}!**\n\n{combat_start.get('message', 'Combat begins! Roll for initiative!')}",
-            "validation": validation,
-            "state_node": combat_node.to_dict(),
-            "transition": "narration -> combat",
-            "choices": None,
-            "narration_round": tree.narration_round,
-            "combat_count": tree.combat_count,
-            "combat_session_id": combat_start["session_id"],  # Include combat session ID for frontend redirect
-        }
-
-    # Check if game should end (max combats reached)
-    if tree.should_end_game():
-        ending_text = f"🎉 **ADVENTURE COMPLETE!** 🎉\n\nYou have completed {tree.combat_count} combat encounters! Your journey has come to an end. Well done, adventurer!\n\n*The adventure ends here. Thank you for playing!*"
-        current_node.state_type = GameStateType.GAME_OVER
-        current_node.agent_response = ending_text
-        current_node.metadata["is_ending"] = True
-        current_node.metadata["ending_type"] = "victory"
-
-        return {
-            "session_id": session_id,
-            "state_type": "game_over",
-            "agent_used": "narrator",
-            "response": ending_text,
-            "validation": validation,
-            "state_node": current_node.to_dict(),
-            "choices": [],
-            "is_ending": True,
-            "ending_type": "victory",
-            "combat_available": False,
-        }
-
-    # Check for combat option (always available)
-    if data.text.lower().strip() in [
-        "⚔️ enter combat",
-        "enter combat",
-        "combat",
-        "fight",
-        "⚔️ combat",
-        "⚔️ enter combat (not available)",
-    ]:
-        # Check if combat is actually available
-        story_tree = story_trees.get(session_id)
-        current_story_node_id = current_story_nodes.get(session_id)
-        combat_available = False
-
-        # Check round-based combat trigger
-        if tree.should_trigger_combat():
-            combat_available = True
-            logger.info(f"Combat triggered at round {tree.narration_round}")
-
-        # Check story tree combat availability
-        if not combat_available and story_tree and current_story_node_id:
-            story_node = story_tree.get_node(current_story_node_id)
-            if story_node:
-                combat_available = story_node.combat_available
-
-        # Check metadata
-        if not combat_available:
-            combat_available = current_node.metadata.get("combat_available", False)
-
-        if not combat_available:
-            # Combat not available yet
-            return {
-                "session_id": session_id,
-                "state_type": "narration",
-                "agent_used": "narrator",
-                "response": "⚔️ **No combat available yet.**\n\nThe current situation doesn't present any immediate threats or combat opportunities. Continue exploring to find enemies!",
-                "validation": validation,
-                "state_node": current_node.to_dict(),
-                "choices": _get_choices_with_combat(current_node, story_tree, current_story_node_id),
-                "combat_available": False,
-            }
-        else:
-            # Combat is available - trigger combat
-            logger.info(f"Combat triggered at round {tree.narration_round}")
-
-            combat_node = tree.add_child(
-                parent_id=current_node.id,
-                state_type=GameStateType.COMBAT,
-                agent=AgentType.COMBAT,
-                metadata={
-                    "trigger": "player_requested",
-                    "story_node_id": current_story_node_id,
-                    "narration_round": tree.narration_round,
-                },
-            )
-
-            # Get character class from game tree metadata
-            root_node = tree.get_node(tree.root_id) if tree.root_id else None
-            character_class = root_node.metadata.get("character_class") if root_node else None
-
-            # Start combat with rules context and character class
-            combat_start = call_combat_agent_start(
-                rules_context=validation.get("rule_text"), character_class=character_class
-            )
-            combat_node.combat_session_id = combat_start["session_id"]
-            combat_node.agent_response = combat_start.get("message", "⚔️ Combat begins!")
-
-            tree.transition_to(combat_node.id)
-
-            return {
-                "session_id": session_id,
-                "state_type": "combat",
-                "agent_used": "combat",
-                "response": combat_start.get("message", "⚔️ Combat begins! Roll for initiative!"),
-                "validation": validation,
-                "state_node": combat_node.to_dict(),
-                "transition": "narration -> combat",
-                "combat_session_id": combat_start["session_id"],
-                "combat_state": combat_start.get("state", {}),
-                "choices": None,
-                "narration_round": tree.narration_round,
-                "combat_count": tree.combat_count,
-            }
-
-    # Check if we have a story tree for this session
-    story_tree = story_trees.get(session_id)
-    current_story_node_id = current_story_nodes.get(session_id)
-
-    response_text = None
-    response_choices = None
-    is_ending = False
-    ending_type = None
-    next_story_node_id = None
-    combat_available = False
-
-    if story_tree and current_story_node_id:
-        # Try to find next node based on player's choice
-        story_node = story_tree.get_node(current_story_node_id)
-        if story_node:
-            # Check if this is an ending node
-            if story_node.is_ending:
-                is_ending = True
-                ending_type = story_node.ending_type
-                response_text = story_node.narrative
-                response_choices = []  # No choices at endings
-                current_node.metadata["is_ending"] = True
-                current_node.metadata["ending_type"] = ending_type
-                current_node.state_type = GameStateType.GAME_OVER
-            else:
-                # Find next node based on choice
-                next_story_node = story_tree.get_next_node_for_choice(current_story_node_id, data.text)
-
-                if next_story_node:
-                    # Use predefined narrative
-                    response_text = next_story_node.narrative
-                    response_choices = next_story_node.choices
-                    next_story_node_id = next_story_node.node_id
-                    is_ending = next_story_node.is_ending
-                    ending_type = next_story_node.ending_type
-                    combat_available = next_story_node.combat_available
-
-                    # Update current story node
-                    current_story_nodes[session_id] = next_story_node_id
-                    current_node.metadata["story_node_id"] = next_story_node_id
-                    current_node.metadata["is_ending"] = is_ending
-                    current_node.metadata["combat_available"] = combat_available
-                    if is_ending:
-                        current_node.metadata["ending_type"] = ending_type
-                        current_node.state_type = GameStateType.GAME_OVER
-                else:
-                    # No matching node found, use AI narrator but guide toward story tree
-                    logger.info(f"No matching story node for choice: {data.text}, using AI narrator")
-                    # Get story context for continuity
-                    story_summary = context_builder.get_story_summary(tree, max_nodes=10)
-                    response = call_narrator_agent(
-                        data.text,
-                        rules_context=validation.get("rule_text"),
-                        generate_choices=True,
-                        story_context=story_summary,
-                    )
-                    response_text = response["result"]
-                    response_choices = response.get("choices")
-
-                    # Try to find a nearby node in the story tree
-                    keywords = data.text.split()[:5]  # Use first few words as keywords
-                    nearby_node = story_tree.find_node_by_keywords(keywords, current_story_node_id)
-                    if nearby_node:
-                        logger.info(f"Found nearby story node: {nearby_node.node_id}, guiding narrative")
-                        # Blend AI response with story guidance
-                        response_text = f"{response_text}\n\n{nearby_node.narrative[:200]}..."
-                        response_choices = nearby_node.choices if nearby_node.choices else response_choices
-                        combat_available = nearby_node.combat_available
-
-    if not response_text:
-        # No story tree or no match, use AI narrator
-        # Get story context for continuity
-        story_summary = context_builder.get_story_summary(tree, max_nodes=10)
-        response = call_narrator_agent(
-            data.text, rules_context=validation.get("rule_text"), generate_choices=True, story_context=story_summary
-        )
-        response_text = response["result"]
-        response_choices = response.get("choices")
-
-    current_node.agent_response = response_text
-    current_node.narrative_text = response_text
-
-    # Store choices in metadata for tree-structure mode
-    if response_choices:
-        current_node.metadata["choices"] = response_choices
-
-    # Round-based combat trigger is now checked at the start of handle_narration_action
-    # (moved up to line 340 to trigger immediately after round increment)
-
-    # Check for AI-detected combat trigger (fallback)
-    if detect_combat_trigger(response_text):
-        logger.info("Combat triggered by AI detection during narration")
-
-        combat_node = tree.add_child(
-            parent_id=current_node.id,
-            state_type=GameStateType.COMBAT,
-            agent=AgentType.COMBAT,
-            metadata={
-                "trigger": "ai_detected",
-                "narration_round": tree.narration_round,
-                "trigger_rules": validation.get("rule_text"),
-            },
-        )
-
-        # Get character class from game tree metadata
-        root_node = tree.get_node(tree.root_id) if tree.root_id else None
-        character_class = root_node.metadata.get("character_class") if root_node else None
-
-        # Start combat with rules context and character class
-        # Use combat_count + 1 because we're about to start a new combat
-        combat_start = call_combat_agent_start(
-            rules_context=validation.get("rule_text"),
-            character_class=character_class,
-            combat_count=tree.combat_count + 1,
-        )
-        combat_node.combat_session_id = combat_start["session_id"]
-        combat_node.agent_response = combat_start.get("message", "Combat initiated!")
-
-        tree.transition_to(combat_node.id)
-
-        return {
-            "session_id": data.session_id,
-            "state_type": "combat",
-            "agent_used": "combat",
-            "response": combat_start.get("message", "Combat begins!"),
-            "validation": validation,
-            "state_node": combat_node.to_dict(),
-            "transition": "narration -> combat",
-            "choices": None,
-            "narration_round": tree.narration_round,
-            "combat_count": tree.combat_count,
-        }
-
-    # Determine combat availability (check round-based triggers)
-    if tree.should_trigger_combat():
-        combat_available = True
-        logger.info(f"Combat available at round {tree.narration_round}")
-
-    # Always add combat option to choices
-    final_choices = _get_choices_with_combat(current_node, story_tree, current_story_node_id, response_choices, tree)
-
-    # Ensure we always have choices (generate default if none)
-    if not final_choices or len(final_choices) == 0:
-        # Generate default choices if AI didn't provide any
-        final_choices = [
-            "Continue exploring",
-            "Investigate the area",
-            "Search for clues",
-            "⚔️ Enter Combat (Not Available)" if not combat_available else "⚔️ Enter Combat",
-        ]
-
+def _build_initial_state(
+    session_id: str,
+    campaign_id: Optional[str],
+    party: list[PlayerCharacter],
+    max_combats: int,
+    combat_rounds: Optional[List[int]],
+    initial_prompt: str,
+    campaign_metadata: dict,
+) -> dict:
+    """Build the initial DnDGameState for a new session."""
     return {
-        "session_id": data.session_id,
-        "state_type": "game_over" if is_ending else "narration",
-        "agent_used": "narrator",
-        "response": response_text,
-        "validation": validation,
-        "state_node": current_node.to_dict(),
-        "choices": final_choices,  # Include choices with combat option
-        "is_ending": is_ending,
-        "ending_type": ending_type,
-        "combat_available": combat_available,
-        "narration_round": tree.narration_round,
-        "combat_count": tree.combat_count,
-        "max_combats": tree.max_combats,
+        "player_action": "",
+        "pending_actions": {},
+        "session_id": session_id,
+        "state_type": "narration",
+        "narration_round": 0,
+        "combat_count": 0,
+        "max_combats": max_combats,
+        "combat_rounds": combat_rounds or [3, 5, 10, 15],
+        "players": [pc.to_dict() for pc in party],
+        "room_id": None,
+        "acting_player_id": None,
+        "initiative_order": [],
+        "validation_result": {},
+        "is_sabotage": False,
+        "narrator_response": initial_prompt,
+        "choices": [],
+        "combat_response": {},
+        "combat_session_id": None,
+        "combat_trigger": "none",
+        "campaign_id": campaign_id,
+        "current_story_node_id": None,
+        "campaign_metadata": campaign_metadata,
+        "is_ending": False,
+        "ending_type": None,
+        "messages": [],
+        "story_summary": "",
+        "response": initial_prompt,
+        "transition": None,
+        "response_extras": {},
     }
 
 
-def _get_choices_with_combat(
-    current_node,
-    story_tree,
-    current_story_node_id: Optional[str],
-    base_choices: Optional[List[str]] = None,
-    game_tree: Optional[GameStateTree] = None,
-) -> List[str]:
-    """Add combat option to choices list - DISABLED: Combat is now triggered via UI button only"""
-    choices = base_choices if base_choices else []
+def _format_response(session_id: str, state: dict) -> dict:
+    extras = state.get("response_extras", {})
 
-    # Get combat availability from multiple sources
-    combat_available = False
-
-    # Check round-based combat triggers
-    if game_tree and game_tree.should_trigger_combat():
-        combat_available = True
-        logger.info(f"Combat available at round {game_tree.narration_round}")
-
-    # Check story tree combat availability
-    if not combat_available and story_tree and current_story_node_id:
-        story_node = story_tree.get_node(current_story_node_id)
-        if story_node:
-            combat_available = story_node.combat_available
-
-    # Check metadata for combat availability
-    if not combat_available:
-        combat_available = current_node.metadata.get("combat_available", False)
-
-    # REMOVED: Combat option is no longer added to choices list
-    # Players must click the "Enter Battle" button in the UI instead
-    # This prevents confusion and ensures combat is only entered when the player is ready
-
-    return choices
-
-
-def handle_combat_action(tree: GameStateTree, current_node, data: UserInput, validation: Dict) -> Dict:
-    """Handle action during combat state"""
-
-    # ✅ SPECIAL CASE: If text indicates combat ended, check state directly first
-    combat_ended_keywords = ["combat ended", "combat end", "battle ended", "battle over"]
-    is_combat_ended_notification = data.text.lower().strip() in combat_ended_keywords
-
-    if is_combat_ended_notification:
-        logger.info(
-            f"Received combat ended notification, checking combat state directly for session: {current_node.combat_session_id}"
-        )
-        # Check combat state directly instead of sending action
-        combat_state = get_combat_state_direct(current_node.combat_session_id)
-
-        if combat_state and combat_state.get("battle_over"):
-            # Combat has ended - use the state data
-            combat_response = {
-                "narrative": combat_state.get("winner") == "players"
-                and "🎉 Victory! The battle has ended!"
-                or "The battle has ended.",
-                "raw_result": "Battle over",
-                "state": combat_state,
-            }
-            logger.info(f"Combat confirmed ended via state check. Winner: {combat_state.get('winner')}")
-        else:
-            # State check failed or battle not over - try normal action processing
-            logger.warning("Combat state check failed or battle not over, falling back to normal action")
-            combat_response = call_combat_agent_action(
-                session_id=current_node.combat_session_id, action=data.text, rules_context=validation.get("rule_text")
-            )
-    else:
-        # Normal combat action - process as usual
-        combat_response = call_combat_agent_action(
-            session_id=current_node.combat_session_id, action=data.text, rules_context=validation.get("rule_text")
-        )
-
-    current_node.agent_response = combat_response.get("narrative", "Combat continues...")
-
-    # Check for combat end
-    if detect_combat_end(combat_response.get("state", {})):
-        logger.info("Combat ended")
-
-        narration_node = tree.add_child(
-            parent_id=current_node.id,
-            state_type=GameStateType.NARRATION,
-            agent=AgentType.NARRATOR,
-            metadata={
-                "combat_outcome": combat_response["state"].get("winner"),
-                "previous_combat_id": current_node.combat_session_id,
-                "narration_round": tree.narration_round,  # ✅ Preserve round count
-                "combat_count": tree.combat_count,  # ✅ Will be incremented below, but set initial value
-                "max_combats": tree.max_combats,  # ✅ Preserve max combats
-            },
-        )
-
-        # Increment combat count
-        tree.increment_combat_count()
-
-        # Check if game should end after this combat
-        if tree.should_end_game():
-            ending_text = f"🎉 **ADVENTURE COMPLETE!** 🎉\n\nYou have completed {tree.combat_count} combat encounters! Your journey has come to an end. Well done, adventurer!\n\n*The adventure ends here. Thank you for playing!*"
-            narration_node.state_type = GameStateType.GAME_OVER
-            narration_node.agent_response = ending_text
-            narration_node.metadata["is_ending"] = True
-            narration_node.metadata["ending_type"] = "victory"
-
-            tree.transition_to(narration_node.id)
-
-            return {
-                "session_id": data.session_id,
-                "state_type": "game_over",
-                "agent_used": "narrator",
-                "response": ending_text,
-                "validation": validation,
-                "state_node": narration_node.to_dict(),
-                "transition": "combat -> narration -> game_over",
-                "combat_summary": combat_response,
-                "choices": [],
-                "is_ending": True,
-                "ending_type": "victory",
-                "combat_count": tree.combat_count,
-                "max_combats": tree.max_combats,
-            }
-
-        # Generate post-combat narration
-        winner = combat_response["state"].get("winner", "unknown")
-        combat_summary = combat_response.get("narrative", "The battle concluded.")
-
-        # Get story summary from game tree to maintain continuity (limit to 10 nodes to avoid token limits)
-        story_summary = context_builder.get_story_summary(tree, max_nodes=10)
-        # Truncate story summary if too long (max 2000 chars to leave room for prompt)
-        if len(story_summary) > 2000:
-            story_summary = story_summary[-2000:]  # Take last 2000 chars (most recent context)
-            logger.warning(f"Story summary truncated to 2000 characters for post-combat narration")
-        logger.info(f"Post-combat narration using story context: {len(story_summary)} characters")
-
-        if winner == "players":
-            post_combat_prompt = f"""The heroes have emerged victorious from battle! 
-
-Combat Summary: {combat_summary}
-
-As the dust settles and the defeated enemies lie before you, describe:
-1. The aftermath of the battle - what do you see around you?
-2. The sense of triumph and what the victory means
-3. What lies ahead - new paths, discoveries, or challenges that await exploration
-
-Continue the adventure with vivid narration that acknowledges the victory and leads to new exploration opportunities. Make it engaging and set up the next part of the adventure."""
-        else:
-            post_combat_prompt = f"""The battle has ended, but not in the heroes' favor.
-
-Combat Summary: {combat_summary}
-
-Describe the aftermath and what happens next in the story."""
-
-        # Pass story context to narrator to maintain continuity
-        logger.info("Calling narrator agent for post-combat narration...")
-        try:
-            narrator_response = call_narrator_agent(
-                post_combat_prompt, generate_choices=True, story_context=story_summary
-            )
-
-            # Check if narrator response is valid
-            if not narrator_response or not narrator_response.get("result"):
-                logger.error("Narrator agent returned empty response for post-combat narration")
-                # Use fallback narration
-                if winner == "players":
-                    fallback_narration = f"""As the dust settles, you stand victorious over your defeated foes. The battle was fierce, but your skill and determination carried the day. 
-
-{combat_summary}
-
-The immediate threat has been neutralized, and you can now take a moment to assess your surroundings. The path ahead remains open, and new adventures await."""
-                else:
-                    fallback_narration = f"""The battle has ended, though not as you might have hoped. 
-
-{combat_summary}
-
-Despite the outcome, the adventure continues. You must regroup and decide your next move."""
-
-                narration_node.agent_response = fallback_narration
-                # Generate simple choices as fallback
-                narration_node.metadata["choices"] = [
-                    "Take a moment to rest and recover.",
-                    "Search the area for useful items or clues.",
-                    "Continue exploring forward.",
-                    "Examine your surroundings more carefully.",
-                ]
-            else:
-                narration_node.agent_response = narrator_response["result"]
-                if narrator_response.get("choices"):
-                    narration_node.metadata["choices"] = narrator_response["choices"]
-                else:
-                    # Fallback choices if narrator didn't generate any
-                    narration_node.metadata["choices"] = [
-                        "Take a moment to rest and recover.",
-                        "Search the area for useful items or clues.",
-                        "Continue exploring forward.",
-                        "Examine your surroundings more carefully.",
-                    ]
-        except Exception as e:
-            logger.error(f"Exception during post-combat narration: {str(e)}")
-            import traceback
-
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            # Use fallback narration on exception
-            if winner == "players":
-                fallback_narration = f"""As the dust settles, you stand victorious over your defeated foes. The battle was fierce, but your skill and determination carried the day. 
-
-{combat_summary}
-
-The immediate threat has been neutralized, and you can now take a moment to assess your surroundings. The path ahead remains open, and new adventures await."""
-            else:
-                fallback_narration = f"""The battle has ended, though not as you might have hoped. 
-
-{combat_summary}
-
-Despite the outcome, the adventure continues. You must regroup and decide your next move."""
-
-            narration_node.agent_response = fallback_narration
-            narration_node.metadata["choices"] = [
-                "Take a moment to rest and recover.",
-                "Search the area for useful items or clues.",
-                "Continue exploring forward.",
-                "Examine your surroundings more carefully.",
-            ]
-
-        # ✅ Update metadata with final combat count (after increment)
-        narration_node.metadata["combat_count"] = tree.combat_count
-        narration_node.metadata["narration_round"] = tree.narration_round
-
-        tree.transition_to(narration_node.id)
-
-        # Add combat option to choices
-        story_tree = story_trees.get(data.session_id)
-        current_story_node_id = current_story_nodes.get(data.session_id)
-        final_choices = _get_choices_with_combat(
-            narration_node, story_tree, current_story_node_id, narrator_response.get("choices"), tree
-        )
-
-        return {
-            "session_id": data.session_id,
-            "state_type": "narration",
-            "agent_used": "narrator",
-            "response": narrator_response["result"],
-            "validation": validation,
-            "state_node": narration_node.to_dict(),
-            "transition": "combat -> narration",
-            "combat_summary": combat_response,
-            "choices": final_choices,
-            "narration_round": tree.narration_round,
-            "combat_count": tree.combat_count,
-            "max_combats": tree.max_combats,
-        }
-
-    return {
-        "session_id": data.session_id,
-        "state_type": "combat",
-        "agent_used": "combat",
-        "response": combat_response.get("narrative", ""),
-        "validation": validation,
-        "state_node": current_node.to_dict(),
-        "combat_state": combat_response.get("state", {}),
-        "choices": None,  # Combat doesn't generate choices
+    response = {
+        "session_id": session_id,
+        "state_type": state.get("state_type", "narration"),
+        "agent_used": _infer_agent(state),
+        "response": state.get("response", ""),
+        "validation": extras.get("validation"),
+        "state_node": _build_state_node(state),
+        "transition": state.get("transition"),
+        "choices": state.get("choices", []),
+        "narration_round": state.get("narration_round", 0),
+        "combat_count": state.get("combat_count", 0),
+        "max_combats": state.get("max_combats", 5),
+        "players": state.get("players", []),
+        "acting_player_id": state.get("acting_player_id"),
     }
+
+    for key in ("combat_session_id", "combat_state", "combat_summary",
+                "is_ending", "ending_type", "combat_available", "error"):
+        if key in extras:
+            response[key] = extras[key]
+
+    if state.get("is_ending"):
+        response["is_ending"] = True
+        response["ending_type"] = state.get("ending_type")
+
+    if state.get("combat_session_id"):
+        response["combat_session_id"] = state["combat_session_id"]
+
+    return response
+
+
+def _infer_agent(state: dict) -> str:
+    if state.get("is_sabotage"):
+        return "orchestrator"
+    if state.get("state_type") == "combat":
+        return "combat"
+    return "narrator"
+
+
+def _build_state_node(state: dict) -> dict:
+    return {
+        "state_type": state.get("state_type", "narration"),
+        "narrative_text": state.get("narrator_response", ""),
+        "player_action": state.get("player_action", ""),
+        "agent_response": state.get("response", ""),
+        "metadata": state.get("campaign_metadata", {}),
+        "narration_round": state.get("narration_round", 0),
+        "combat_count": state.get("combat_count", 0),
+    }
+
+
+def _validate_uuid(value: str) -> None:
+    try:
+        UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID format")
 
 
 # ========== API Routes ==========
 @app.get("/")
 async def root():
     return {
-        "service": "D&D Game Orchestrator",
-        "version": "2.0",
-        "features": ["rule_validation", "state_management", "agent_routing"],
+        "service": "D&D Game Orchestrator (LangGraph)",
+        "version": "3.1",
+        "features": [
+            "langgraph_state_machine",
+            "postgres_checkpointer",
+            "redis_session_index",
+            "rule_validation",
+            "multiplayer_state_shape",
+        ],
     }
 
 
 @app.get("/health")
-async def health_check():
-    """Health check with service status"""
+def health_check():
+    rule_agent_url = os.getenv("RULE_AGENT_URL", "http://localhost:9002")
     try:
-        rule_agent_healthy = rule_validator.check_health()
-    except Exception as e:
-        logger.warning(f"Health check error: {e}")
+        resp = requests.get(f"{rule_agent_url}/health", timeout=5)
+        rule_agent_healthy = resp.status_code == 200
+    except Exception:  # noqa: BLE001
         rule_agent_healthy = False
+
+    try:
+        redis_healthy = bool(get_redis().ping())
+        active_sessions = _active_session_count()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Redis health check failed: {e}")
+        redis_healthy = False
+        active_sessions = 0
+
     return {
-        "status": "healthy",
-        "services": {"rule_agent": rule_agent_healthy, "active_sessions": len(game_sessions)},
+        "status": "healthy" if redis_healthy else "degraded",
+        "services": {
+            "rule_agent": rule_agent_healthy,
+            "redis": redis_healthy,
+            "active_sessions": active_sessions,
+            "graph": "compiled",
+        },
     }
 
 
 @app.get("/campaigns")
 def list_campaigns():
-    """Get list of available campaigns"""
     return {"campaigns": CampaignLoader.list_campaigns()}
 
 
 @app.get("/campaigns/{campaign_id}")
 def get_campaign_details(campaign_id: str):
-    """Get detailed information about a specific campaign"""
     campaign = CampaignLoader.get_campaign(campaign_id)
     if not campaign:
         raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found")
     return campaign.to_dict()
 
 
-@app.post("/game/start")
-def start_game(request: GameStartRequest):
+def _resolve_campaign(
+    campaign_id: Optional[str],
+    initial_prompt_override: Optional[str],
+    lead: PlayerCharacter,
+    party_size: int,
+) -> tuple[str, dict, Optional[str]]:
+    """Resolve a campaign id (or custom initial prompt) into the tuple
+    (initial_prompt, campaign_metadata, current_story_node_id).
+
+    Single source of truth shared by /game/start and /rooms/{id}/start. Raises
+    HTTPException(400) when the campaign id is unknown.
     """
-    Initialize a new game session with optional campaign.
+    initial_prompt = "Start a new D&D adventure in a fantasy tavern."
+    campaign_metadata: dict = {}
+    current_story_node_id: Optional[str] = None
 
-    Supports:
-    - Pre-loaded campaigns (e.g., "stormwreck-isle")
-    - Custom character creation
-    - Custom starting prompts
-
-    Examples:
-    1. Start Dragons of Stormwreck Isle:
-       {"campaign_id": "stormwreck-isle", "character_class": "Fighter", "character_name": "Thorin"}
-
-    2. Custom adventure:
-       {"initial_prompt": "You wake up in a dark dungeon..."}
-    """
-    session_id = str(uuid4())
-    tree = GameStateTree()
-
-    # Configure combat settings
-    if request.max_combats:
-        tree.max_combats = request.max_combats
-    if request.combat_rounds:
-        tree.combat_rounds = request.combat_rounds
-
-    root = tree.create_root(GameStateType.NARRATION)
-
-    # Store character info in root metadata for combat initialization
-    root.metadata["character_class"] = request.character_class
-    root.metadata["character_name"] = request.character_name
-
-    # Determine initial prompt
-    story_tree = None
-    current_story_node_id = None
-
-    if request.campaign_id:
-        # Load pre-defined campaign
+    if campaign_id:
         try:
             campaign_data = CampaignLoader.initialize_campaign(
-                request.campaign_id, request.character_class, request.character_name
+                campaign_id, lead.character_class, lead.character_name,
             )
-
-            # Try to load story tree for this campaign
-            story_tree = StoryTreeLoader.load_story_tree(request.campaign_id)
-            if story_tree:
-                story_trees[session_id] = story_tree
-                current_story_node_id = story_tree.root_node_id
-                current_story_nodes[session_id] = current_story_node_id
-
-                # Use predefined narrative from story tree if available
-                story_node = story_tree.get_root()
-                if story_node:
-                    initial_prompt = story_node.narrative
-                    root.metadata["story_node_id"] = story_node.node_id
-                    root.metadata["story_choices"] = story_node.choices
-                    root.metadata["is_ending"] = story_node.is_ending
-                    root.metadata["combat_available"] = story_node.combat_available
-                    if story_node.is_ending:
-                        root.metadata["ending_type"] = story_node.ending_type
-            else:
-                initial_prompt = campaign_data["initial_prompt"]
-                logger.info(f"No story tree found for {request.campaign_id}, using free-form mode")
-
-            # Store campaign metadata in root node
-            root.metadata.update(
-                {
-                    "campaign_id": campaign_data["campaign_id"],
-                    "campaign_name": campaign_data["campaign_name"],
-                    "starting_location": campaign_data["starting_location"],
-                    "initial_quest": campaign_data["initial_quest"],
-                    **campaign_data["metadata"],
-                }
-            )
-
-            logger.info(f"Starting campaign: {campaign_data['campaign_name']}")
-
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    elif request.initial_prompt:
-        # Custom prompt provided
-        initial_prompt = request.initial_prompt
-        root.metadata.update(
-            {
-                "campaign_type": "custom",
-                "character_class": request.character_class,
-                "character_name": request.character_name,
-            }
-        )
+        initial_prompt = campaign_data["initial_prompt"]
+        campaign_metadata = {
+            "campaign_id": campaign_data["campaign_id"],
+            "campaign_name": campaign_data["campaign_name"],
+            "starting_location": campaign_data["starting_location"],
+            "initial_quest": campaign_data["initial_quest"],
+            **campaign_data["metadata"],
+        }
 
+        story_tree = StoryTreeLoader.load_story_tree(campaign_id)
+        if story_tree:
+            current_story_node_id = story_tree.root_node_id
+            story_root = story_tree.get_root()
+            if story_root:
+                initial_prompt = story_root.narrative
+                campaign_metadata["story_node_id"] = story_root.node_id
+                campaign_metadata["story_choices"] = story_root.choices
+                campaign_metadata["is_ending"] = story_root.is_ending
+                campaign_metadata["combat_available"] = story_root.combat_available
+
+        logger.info("Starting campaign: %s", campaign_metadata.get("campaign_name"))
+
+    elif initial_prompt_override:
+        initial_prompt = initial_prompt_override
+        campaign_metadata = {"campaign_type": "custom", "party_size": party_size}
     else:
-        # Default tavern start
-        initial_prompt = "Start a new D&D adventure in a fantasy tavern."
-        root.metadata["campaign_type"] = "default"
+        campaign_metadata = {"campaign_type": "default", "party_size": party_size}
 
-    # Use the pre-written campaign opening, but generate choices for the first round
-    root.narrative_text = initial_prompt
-    root.agent_response = initial_prompt
-    root.player_action = None  # No player action yet, this is the campaign intro
+    return initial_prompt, campaign_metadata, current_story_node_id
 
-    # Generate choices for the initial prompt using narrator
-    initial_choices = []
+
+@app.post("/game/start")
+def start_game(request: GameStartRequest):
+    """
+    Initialize a new game session.
+
+    Supports solo (`character_class`/`character_name`) or multiplayer (`players`).
+    Session state is persisted via the Postgres checkpointer.
+    """
+    session_id = str(uuid4())
+    party = _resolve_party(request)
+    campaign_id = request.campaign_id
+    initial_prompt, campaign_metadata, current_story_node_id = _resolve_campaign(
+        campaign_id=campaign_id,
+        initial_prompt_override=request.initial_prompt,
+        lead=party[0],
+        party_size=len(party),
+    )
+
+    initial_state = _build_initial_state(
+        session_id=session_id,
+        campaign_id=campaign_id,
+        party=party,
+        max_combats=request.max_combats or 5,
+        combat_rounds=request.combat_rounds,
+        initial_prompt=initial_prompt,
+        campaign_metadata=campaign_metadata,
+    )
+
+    if current_story_node_id:
+        initial_state["current_story_node_id"] = current_story_node_id
+
+    initial_choices: list[str] = []
     try:
-        narrator_response = call_narrator_agent(initial_prompt, generate_choices=True)
+        initial_choices = generate_initial_choices(initial_prompt)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error generating initial choices: {e}")
 
-        # Extract choices from narrator response
-        # Handle case where choices might be None
-        initial_choices = narrator_response.get("choices") or []
-        if initial_choices:
-            root.metadata["story_choices"] = initial_choices
-            logger.info(f"Generated {len(initial_choices)} initial choices")
-        else:
-            logger.warning("No choices generated by narrator, using empty list")
-    except Exception as e:
-        logger.error(f"Error generating initial choices: {str(e)}")
-        initial_choices = []  # Fallback to empty choices
+    initial_state["choices"] = initial_choices
 
-    # Check if combat immediately triggered
-    if detect_combat_trigger(initial_prompt):
-        root.transition_triggered = True
-        root.next_state_type = GameStateType.COMBAT
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    graph.update_state(config, initial_state)
 
-    game_sessions[session_id] = tree
+    _register_session(
+        session_id,
+        {"campaign_id": campaign_id, "party_size": len(party)},
+    )
 
-    logger.info(f"Started new game session: {session_id}")
+    logger.info(f"Started new game session: {session_id} (party of {len(party)})")
 
-    # Add combat option to initial choices
-    combat_available = root.metadata.get("combat_available", False)
-    # Check round-based combat trigger
-    if tree.should_trigger_combat():
-        combat_available = True
-
-    if combat_available:
-        initial_choices.append("⚔️ Enter Combat")
-    else:
-        initial_choices.append("⚔️ Enter Combat (Not Available)")
+    combat_available = campaign_metadata.get("combat_available", False)
 
     return {
         "session_id": session_id,
-        "state": root.to_dict(),
+        "state": _build_state_node(initial_state),
         "response": initial_prompt,
-        "campaign_info": root.metadata,
-        "choices": initial_choices,  # Include choices with combat option
-        "is_ending": root.metadata.get("is_ending", False),
+        "campaign_info": campaign_metadata,
+        "choices": initial_choices,
+        "is_ending": False,
         "combat_available": combat_available,
-        "narration_round": tree.narration_round,
-        "combat_count": tree.combat_count,
-        "max_combats": tree.max_combats,
+        "narration_round": 0,
+        "combat_count": 0,
+        "max_combats": request.max_combats or 5,
+        "players": [pc.to_dict() for pc in party],
         "message": "Game started successfully!",
     }
 
 
 @app.post("/game/action")
-def game_action(data: UserInput):
+@limiter.limit(LIMIT_GAME_ACTION)
+def game_action(request: Request, data: UserInput):
     """
-    Handle player action with full validation pipeline.
+    Handle a player action via the LangGraph state machine.
 
-    Flow:
-    1. Validate action with Rule Agent
-    2. Check for sabotage/invalid actions
-    3. Route to appropriate agent (Narrator/Combat)
-    4. Detect state transitions
-    5. Update game tree
+    For solo games, `player_id` is optional and defaults to the lone party
+    member. For multiplayer use the room endpoints (Phase 3) which collect
+    actions across the party before invoking the graph.
     """
-
-    if not data.session_id or data.session_id not in game_sessions:
+    if not data.session_id:
         raise HTTPException(status_code=404, detail="Session not found. Please start a new game first.")
 
-    tree = game_sessions[data.session_id]
-    current_node = tree.get_current()
+    current_state = get_session_state(data.session_id)
+    if not current_state:
+        raise HTTPException(status_code=404, detail="Session not found. Please start a new game first.")
 
-    if not current_node:
-        raise HTTPException(status_code=500, detail="Invalid game state")
+    players = current_state.get("players", [])
+    if not players:
+        raise HTTPException(status_code=500, detail="Session has no party")
 
-    logger.info(f"Session {data.session_id}: Processing action '{data.text}' in state {current_node.state_type.value}")
+    if data.player_id is None:
+        if len(players) > 1:
+            raise HTTPException(status_code=400, detail="player_id is required for multiplayer sessions")
+        player_id = players[0]["player_id"]
+    else:
+        player_id = data.player_id
+        if not any(p["player_id"] == player_id for p in players):
+            raise HTTPException(status_code=400, detail="player_id is not in this session's party")
 
-    # ========== STEP 1: RULE VALIDATION ==========
-    game_context = context_builder.build_context(tree)
-    validation = rule_validator.validate_action(data.text, game_context)
+    pending_actions = {player_id: data.text}
+    combined = synthesize_party_action(players, pending_actions)
 
-    # Store validation in node
-    current_node.rule_validation = validation
-    current_node.was_validated = True
+    logger.info(
+        f"Session {data.session_id}: player {player_id} action in state "
+        f"{current_state.get('state_type', 'unknown')}"
+    )
 
-    logger.info(f"Validation result: {validation.get('validation_type')}")
+    graph_input = _build_graph_input(
+        session_id=data.session_id,
+        current_state=current_state,
+        combined_action=combined,
+        pending_actions=pending_actions,
+        players_dicts=players,
+        room_id=current_state.get("room_id"),
+    )
 
-    # ========== STEP 2: HANDLE SABOTAGE ==========
-    if rule_validator.is_sabotage(validation):
-        logger.warning(f"Sabotage detected: {data.text}")
-        return {
-            "session_id": data.session_id,
-            "error": "invalid_action",
-            "validation": validation,
-            "message": (
-                f"Your input: '{data.text}'\n\n"
-                "This appears to be a meta-game or sabotage attempt. "
-                "Please provide an in-character action that follows D&D rules."
-            ),
-        }
+    try:
+        result = invoke_game_action(data.session_id, combined, graph_input)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Graph invocation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error processing action. Please try again.")
 
-    # ========== STEP 3: HANDLE INVALID ACTIONS (if needed) ==========
-    # Note: Current Rule Agent informs but doesn't reject
-    # Uncomment below if you want to block invalid actions
-    # if not validation.get("is_valid", True):
-    #     current_node.validation_errors.append(validation.get("explanation"))
-    #     return {
-    #         "session_id": data.session_id,
-    #         "error": "rule_violation",
-    #         "validation": validation,
-    #         "message": f"Action not allowed: {validation.get('explanation')}"
-    #     }
-
-    # ========== STEP 4: ACTION IS VALID - ROUTE TO AGENT ==========
-    current_node.player_action = data.text
-    current_node.applicable_rules = validation.get("rule_text")
-
-    # Route based on current state
-    if current_node.state_type == GameStateType.NARRATION:
-        return handle_narration_action(tree, current_node, data, validation, data.session_id)
-
-    elif current_node.state_type == GameStateType.COMBAT:
-        return handle_combat_action(tree, current_node, data, validation)
-
-    return {"error": "Unknown state type"}
+    return _format_response(data.session_id, result)
 
 
 @app.get("/game/state/{session_id}")
 def get_game_state(session_id: str):
-    """
-    Get current game state and full history.
-
-    Returns:
-    - Current state node
-    - Path from root to current
-    - Full game tree
-    """
-    if session_id not in game_sessions:
+    state = get_session_state(session_id)
+    if not state:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    tree = game_sessions[session_id]
+    messages = state.get("messages", [])
+    story_parts = []
+    for msg in messages[-10:]:
+        content = msg.content if hasattr(msg, "content") else str(msg)
+        if content:
+            story_parts.append(content[:500])
+    story_summary = "\n\n".join(story_parts)
 
     return {
         "session_id": session_id,
-        "current_state": tree.get_current().to_dict() if tree.get_current() else None,
-        "path": [node.to_dict() for node in tree.get_path_from_root()],
-        "story_summary": context_builder.get_story_summary(tree),
-        "full_tree": tree.to_dict(),
+        "state_type": state.get("state_type", "narration"),
+        "acting_player_id": state.get("acting_player_id"),
+        "current_state": _build_state_node(state),
+        "path": [],
+        "story_summary": story_summary,
+        "players": state.get("players", []),
+        "full_tree": {
+            "narration_round": state.get("narration_round", 0),
+            "combat_count": state.get("combat_count", 0),
+            "max_combats": state.get("max_combats", 5),
+            "state_type": state.get("state_type", "narration"),
+        },
     }
 
 
 @app.get("/combat/state/{combat_session_id}")
-def get_combat_state(combat_session_id: str):
-    """Proxy endpoint to get combat state from combat agent"""
+def get_combat_state_proxy(combat_session_id: str):
+    _validate_uuid(combat_session_id)
     try:
-        logger.info(f"Fetching combat state for combat session: {combat_session_id}")
-        response = requests.get(
-            f"{COMBAT_AGENT_URL}/combat/state/{combat_session_id}", timeout=15  # Consistent timeout
-        )
+        response = requests.get(f"{COMBAT_AGENT_URL}/combat/state/{combat_session_id}", timeout=15)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"Combat agent returned error: {str(e)}")
-        if e.response:
-            error_detail = (
-                e.response.json().get("detail", "Combat session not found")
-                if e.response.content
-                else "Combat session not found"
-            )
-            raise HTTPException(status_code=e.response.status_code, detail=error_detail)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error getting combat state: {e}")
         raise HTTPException(status_code=500, detail="Failed to get combat state")
-    except Exception as e:
-        logger.error(f"Error getting combat state: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get combat state: {str(e)}")
 
 
 @app.post("/combat/action/{combat_session_id}")
 def submit_combat_action(combat_session_id: str, action_data: CombatActionRequest):
-    """Proxy endpoint to submit combat action to combat agent"""
+    _validate_uuid(combat_session_id)
     try:
-        logger.info(f"Submitting combat action for session {combat_session_id}: {action_data.action}")
-        result = call_combat_agent_action(combat_session_id, action_data.action)
-        return result
-    except Exception as e:
-        logger.error(f"Error submitting combat action: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to submit combat action: {str(e)}")
+        response = requests.post(
+            f"{COMBAT_AGENT_URL}/combat/action/{combat_session_id}",
+            json={"action": action_data.action},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error submitting combat action: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit combat action")
 
 
 @app.delete("/game/session/{session_id}")
 def end_game_session(session_id: str):
-    """End a game session and clean up"""
-    if session_id not in game_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    _validate_uuid(session_id)
+    _unregister_session(session_id)
 
-    del game_sessions[session_id]
     logger.info(f"Ended game session: {session_id}")
-
     return {"message": "Game session ended", "session_id": session_id}
 
 
-# ========== Legacy Endpoints (for backward compatibility) ==========
-@app.post("/agent/narration")
-def narrator_agent_legacy(data: UserInput):
-    """Legacy narrator endpoint"""
-    return call_narrator_agent(data.text)
+# ========================================================================
+# Multiplayer rooms
+# ========================================================================
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ROUND_TIMEOUT_SECONDS = int(os.getenv("ROOM_ROUND_TIMEOUT", "30"))
+SSE_HEARTBEAT_SECONDS = 15
+
+# Per-process timer registry. Single-replica safe; if you scale the
+# orchestrator horizontally, move this to Redis (a sorted-set scheduler).
+_round_timers: Dict[tuple[str, int], asyncio.Task] = {}
 
 
-@app.post("/orchestrate")
-def orchestrate_legacy(data: UserInput):
+class CreateRoomRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    host: PlayerInput
+    max_players: Optional[int] = ROOM_MAX_PARTY_SIZE
+
+
+class JoinRoomRequest(BaseModel):
+    player: PlayerInput
+
+
+class LeaveRoomRequest(BaseModel):
+    player_id: str
+
+    @field_validator("player_id")
+    @classmethod
+    def _check_player_id(cls, v: str) -> str:
+        return _require_uuid(v)
+
+
+class StartRoomRequest(BaseModel):
+    player_id: str  # must be the host
+    campaign_id: Optional[str] = None
+    initial_prompt: Optional[str] = None
+    max_combats: Optional[int] = 5
+    combat_rounds: Optional[List[int]] = None
+
+    @field_validator("player_id")
+    @classmethod
+    def _check_player_id(cls, v: str) -> str:
+        return _require_uuid(v)
+
+
+class RoomActionRequest(BaseModel):
+    player_id: str
+    text: str = Field(max_length=2000)
+
+    @field_validator("player_id")
+    @classmethod
+    def _check_player_id(cls, v: str) -> str:
+        return _require_uuid(v)
+
+
+def _player_input_to_pc(p: PlayerInput) -> PlayerCharacter:
+    return PlayerCharacter.from_class(
+        character_class=p.character_class,
+        character_name=p.character_name,
+        name=p.name,
+        player_id=p.player_id,
+    )
+
+
+def _room_response(room: Room) -> dict:
+    players = RoomManager.list_players(room.room_id)
+    return {
+        **room.to_dict(),
+        "players": [pc.to_dict() for pc in players],
+    }
+
+
+def _validate_room_id(room_id: str) -> None:
+    try:
+        UUID(room_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid room ID format")
+
+
+def _require_player_token(room_id: str, player_id: str, token: Optional[str]) -> None:
+    """Reject the request if the X-Player-Token doesn't match the stored token.
+
+    Raises HTTP 401 (no token) or 403 (wrong token / unknown player). The
+    distinction is intentional: 401 prompts the client to obtain a token,
+    403 means we have one and it's wrong.
     """
-    Legacy orchestrate endpoint.
+    if not token:
+        raise HTTPException(status_code=401, detail="X-Player-Token header required")
+    if not RoomManager.verify_token(room_id, player_id, token):
+        raise HTTPException(status_code=403, detail="invalid player token")
 
-    Note: This is kept for backward compatibility.
-    New clients should use /game/start and /game/action instead.
+
+@app.post("/rooms")
+@limiter.limit(LIMIT_CREATE_ROOM)
+def create_room(request: Request, req: CreateRoomRequest):
+    if req.max_players and req.max_players > ROOM_MAX_PARTY_SIZE:
+        raise HTTPException(status_code=400, detail=f"max_players cannot exceed {ROOM_MAX_PARTY_SIZE}")
+
+    host_pc = _player_input_to_pc(req.host)
+    try:
+        room = RoomManager.create_room(req.name, host_pc.player_id, req.max_players or ROOM_MAX_PARTY_SIZE)
+        RoomManager.add_player(room.room_id, host_pc)
+    except RoomError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Issue the host's token. Returned ONCE here — the client must store it
+    # (sessionStorage) and present it via X-Player-Token on every subsequent
+    # mutating request. Tokens are never echoed in SSE broadcasts.
+    token = RoomManager.issue_token(room.room_id, host_pc.player_id)
+
+    return {
+        **_room_response(RoomManager.get_room(room.room_id)),
+        "player_id": host_pc.player_id,
+        "player_token": token,
+    }
+
+
+@app.get("/rooms")
+def list_rooms():
+    return {"rooms": [_room_response(r) for r in RoomManager.list_rooms()]}
+
+
+@app.get("/rooms/{room_id}")
+def get_room(room_id: str):
+    _validate_room_id(room_id)
+    room = RoomManager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    return _room_response(room)
+
+
+@app.post("/rooms/{room_id}/join")
+def join_room(room_id: str, req: JoinRoomRequest):
+    _validate_room_id(room_id)
+    pc = _player_input_to_pc(req.player)
+    try:
+        RoomManager.add_player(room_id, pc)
+    except RoomError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    room = RoomManager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    token = RoomManager.issue_token(room_id, pc.player_id)
+    return {
+        "player_id": pc.player_id,
+        "player_token": token,
+        "room": _room_response(room),
+    }
+
+
+@app.post("/rooms/{room_id}/leave")
+def leave_room(
+    room_id: str,
+    req: LeaveRoomRequest,
+    x_player_token: Optional[str] = Header(default=None, alias="X-Player-Token"),
+):
+    _validate_room_id(room_id)
+    _require_player_token(room_id, req.player_id, x_player_token)
+    room = RoomManager.remove_player(room_id, req.player_id)
+    if room is None:
+        return {"message": "left", "room": None}
+    return {"message": "left", "room": _room_response(room)}
+
+
+@app.post("/rooms/{room_id}/start")
+def start_room(
+    room_id: str,
+    req: StartRoomRequest,
+    x_player_token: Optional[str] = Header(default=None, alias="X-Player-Token"),
+):
+    """Host transitions the room from lobby to active and creates the LangGraph thread.
+    The room_id IS the LangGraph thread_id from this point on.
     """
-    logger.warning("Using legacy /orchestrate endpoint. Consider migrating to /game/action")
+    _validate_room_id(room_id)
+    _require_player_token(room_id, req.player_id, x_player_token)
+    room = RoomManager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room.state != ROOM_STATE_LOBBY:
+        raise HTTPException(status_code=400, detail="Room already started")
+    if room.host_player_id != req.player_id:
+        raise HTTPException(status_code=403, detail="Only the host can start the room")
 
-    # Simple intent classification
-    if not client:
-        logger.warning("OpenAI client not available, defaulting to narration")
-        intent = "narration"
-    else:
-        prompt = f"""
-        Classify the following D&D player input into one of two categories:
-        - narration
-        - combat
+    party = RoomManager.list_players(room_id)
+    if not party:
+        raise HTTPException(status_code=400, detail="Room has no players")
 
-        Input: "{data.text}"
-        Output:
-        """
+    initial_prompt, campaign_metadata, current_story_node_id = _resolve_campaign(
+        campaign_id=req.campaign_id,
+        initial_prompt_override=req.initial_prompt,
+        lead=party[0],
+        party_size=len(party),
+    )
+
+    # Seed the graph thread (room_id == thread_id)
+    initial_state = _build_initial_state(
+        session_id=room_id,
+        campaign_id=req.campaign_id,
+        party=party,
+        max_combats=req.max_combats or 5,
+        combat_rounds=req.combat_rounds,
+        initial_prompt=initial_prompt,
+        campaign_metadata=campaign_metadata,
+    )
+    initial_state["room_id"] = room_id
+    if current_story_node_id:
+        initial_state["current_story_node_id"] = current_story_node_id
+
+    initial_choices: list[str] = []
+    try:
+        initial_choices = generate_initial_choices(initial_prompt)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error generating initial choices: {e}")
+    initial_state["choices"] = initial_choices
+
+    graph = get_graph()
+    config = {"configurable": {"thread_id": room_id}}
+    graph.update_state(config, initial_state)
+
+    RoomManager.mark_active(room_id, req.campaign_id)
+    _register_session(room_id, {"campaign_id": req.campaign_id, "party_size": len(party), "room_id": room_id})
+
+    return {
+        "room_id": room_id,
+        "session_id": room_id,
+        "response": initial_prompt,
+        "campaign_info": campaign_metadata,
+        "choices": initial_choices,
+        "players": [pc.to_dict() for pc in party],
+        "max_combats": req.max_combats or 5,
+        "current_round": 0,
+    }
+
+
+@app.post("/rooms/{room_id}/action")
+@limiter.limit(LIMIT_ROOM_ACTION)
+async def submit_room_action(
+    request: Request,
+    room_id: str,
+    req: RoomActionRequest,
+    x_player_token: Optional[str] = Header(default=None, alias="X-Player-Token"),
+):
+    """Collect a player's action for the current round.
+
+    Narration: wait until every player has submitted (or ROUND_TIMEOUT_SECONDS
+    elapses), then resolve. Combat: only `acting_player_id` may submit, and
+    the round resolves immediately on that single submission so the next
+    PC's turn can begin.
+    """
+    _validate_room_id(room_id)
+    _require_player_token(room_id, req.player_id, x_player_token)
+    room = RoomManager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room.state != ROOM_STATE_ACTIVE:
+        raise HTTPException(status_code=400, detail="Room is not active")
+
+    party = RoomManager.list_players(room_id)
+    if not any(pc.player_id == req.player_id for pc in party):
+        raise HTTPException(status_code=400, detail="player is not in this room")
+
+    state = get_session_state(room_id)
+    if not state:
+        raise HTTPException(status_code=500, detail="Room session state missing")
+    state_type = state.get("state_type", "narration")
+    round_no = room.current_round
+
+    if state_type == "combat":
+        acting_id = state.get("acting_player_id")
+        if acting_id and req.player_id != acting_id:
+            raise HTTPException(status_code=403, detail="not your turn")
+        actions = {req.player_id: req.text}
+        result = await _resolve_round(room_id, round_no, party, actions)
+        return {
+            "resolved": True,
+            "submitted": [req.player_id],
+            "result": result,
+        }
+
+    # Narration: collect and wait for full party (or timeout)
+    try:
+        actions = RoomManager.submit_action(room_id, round_no, req.player_id, req.text)
+    except RoomError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    submitted = set(actions.keys())
+    party_ids = {pc.player_id for pc in party}
+
+    if submitted >= party_ids:
+        result = await _resolve_round(room_id, round_no, party, actions)
+        return {"resolved": True, "submitted": list(submitted), "result": result}
+
+    _schedule_round_timeout(room_id, round_no)
+    return {"resolved": False, "submitted": list(submitted), "expecting": len(party_ids)}
+
+
+def _schedule_round_timeout(room_id: str, round_no: int) -> None:
+    """Caller is an async handler, so the running loop is already current.
+    Use create_task directly — get_event_loop is deprecated in 3.10+."""
+    key = (room_id, round_no)
+    if key in _round_timers and not _round_timers[key].done():
+        return
+    _round_timers[key] = asyncio.create_task(_round_timeout_task(room_id, round_no))
+
+
+def _cancel_round_timeout(room_id: str, round_no: int) -> None:
+    key = (room_id, round_no)
+    task = _round_timers.pop(key, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _round_timeout_task(room_id: str, round_no: int) -> None:
+    try:
+        await asyncio.sleep(ROUND_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    # Sync Redis/RoomManager work happens off the event loop.
+    party = await asyncio.to_thread(RoomManager.list_players, room_id)
+    actions = await asyncio.to_thread(
+        lambda: get_redis().hgetall(f"room:{room_id}:actions:{round_no}") or {}
+    )
+    if len(actions) == len(party):
+        return  # already resolved by another path
+
+    logger.info("Round %d in room %s timed out; auto-resolving", round_no, room_id)
+    for pc in party:
+        actions.setdefault(pc.player_id, "holds action and observes the situation")
+    await _resolve_round(room_id, round_no, party, actions)
+
+
+def _build_graph_input(
+    session_id: str,
+    current_state: dict,
+    *,
+    combined_action: str,
+    pending_actions: dict[str, str],
+    players_dicts: list[dict],
+    room_id: Optional[str],
+) -> dict:
+    """Single source of truth for the graph_input dict shape.
+
+    Used by both single-player /game/action and multiplayer round resolution.
+    Centralizing this prevents silent state drift if a key is added in one
+    call site but missed in the other (LangGraph would silently fall back to
+    the prior checkpoint value).
+    """
+    return {
+        "player_action": combined_action,
+        "pending_actions": pending_actions,
+        "session_id": session_id,
+        "state_type": current_state.get("state_type", "narration"),
+        "narration_round": current_state.get("narration_round", 0),
+        "combat_count": current_state.get("combat_count", 0),
+        "max_combats": current_state.get("max_combats", 5),
+        "combat_rounds": current_state.get("combat_rounds", [3, 5, 10, 15]),
+        "players": players_dicts,
+        "room_id": room_id,
+        "acting_player_id": current_state.get("acting_player_id"),
+        "initiative_order": current_state.get("initiative_order", []),
+        "combat_session_id": current_state.get("combat_session_id"),
+        "campaign_id": current_state.get("campaign_id"),
+        "current_story_node_id": current_state.get("current_story_node_id"),
+        "story_summary": current_state.get("story_summary", ""),
+        "campaign_metadata": current_state.get("campaign_metadata", {}),
+        "is_ending": False,
+        "ending_type": None,
+        "combat_trigger": "none",
+        "transition": None,
+        "response_extras": {},
+        "messages": current_state.get("messages", []),
+        "validation_result": {},
+        "is_sabotage": False,
+        "narrator_response": "",
+        "choices": [],
+        "combat_response": {},
+        "response": "",
+    }
+
+
+async def _resolve_round(
+    room_id: str,
+    round_no: int,
+    party: list[PlayerCharacter],
+    actions: dict[str, str],
+) -> Optional[dict]:
+    """Acquire the per-room lock, invoke the graph with collected actions,
+    advance the round counter, and broadcast the result to subscribers.
+
+    Background-task safe: never raises HTTPException (runs from a timer
+    coroutine outside any HTTP request context).
+    """
+    if not await asyncio.to_thread(RoomManager.acquire_invoke_lock, room_id):
+        logger.info("Another worker is resolving round %d in room %s", round_no, room_id)
+        return None
+    try:
+        current_state = await asyncio.to_thread(get_session_state, room_id)
+        if not current_state:
+            logger.error("Room session state missing for %s", room_id)
+            return None
+
+        players_dicts = [pc.to_dict() for pc in party]
+        combined = synthesize_party_action(players_dicts, actions)
+
+        graph_input = _build_graph_input(
+            session_id=room_id,
+            current_state=current_state,
+            combined_action=combined,
+            pending_actions=dict(actions),
+            players_dicts=players_dicts,
+            room_id=room_id,
+        )
+
+        result = await asyncio.to_thread(invoke_game_action, room_id, combined, graph_input)
+
+        new_round = await asyncio.to_thread(RoomManager.increment_round, room_id)
+        await asyncio.to_thread(RoomManager.clear_round_actions, room_id, round_no)
+        _cancel_round_timeout(room_id, round_no)
+
+        formatted = _format_response(room_id, result)
+        formatted["current_round"] = new_round
+
+        # Async publish so we don't block the event loop on fanout.
+        if _async_redis is not None:
+            try:
+                await _async_redis.publish(
+                    events_channel(room_id),
+                    json.dumps({
+                        "type": "round-resolved",
+                        "round": round_no,
+                        "result": formatted,
+                    }),
+                )
+            except Exception as e:  # noqa: BLE001 - pub/sub is best-effort
+                logger.warning("Failed to publish round-resolved for %s: %s", room_id, e)
+
+        if result.get("state_type") == "game_over" or result.get("is_ending"):
+            await asyncio.to_thread(RoomManager.mark_ended, room_id)
+
+        return formatted
+    finally:
+        await asyncio.to_thread(RoomManager.release_invoke_lock, room_id)
+
+
+@app.get("/rooms/{room_id}/events")
+@limiter.limit(LIMIT_SSE_CONNECT)
+async def stream_room_events(request: Request, room_id: str):
+    """SSE stream of room events. Client uses EventSource."""
+    _validate_room_id(room_id)
+    if not RoomManager.get_room(room_id):
+        raise HTTPException(status_code=404, detail="Room not found")
+    if _async_redis is None:
+        raise HTTPException(status_code=503, detail="Event stream not yet initialized")
+
+    async def event_stream() -> AsyncIterator[str]:
+        # Reuse the shared async client; only the pubsub object is per-connection.
+        pubsub = _async_redis.pubsub()
+        await pubsub.subscribe(events_channel(room_id))
+
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], temperature=0
-            )
-            intent = response.choices[0].message.content.strip().lower()
-        except Exception as e:
-            logger.error(f"Error classifying intent: {str(e)}")
-            intent = "narration"
+            # Initial snapshot so the client doesn't have to poll
+            room = RoomManager.get_room(room_id)
+            if room:
+                yield f"data: {json.dumps({'type': 'snapshot', 'room': _room_response(room)})}\n\n"
 
-    if "combat" in intent:
-        result = {"agent": "combat", "result": f"⚔️ Combat agent received: {data.text}"}
-    else:
-        result = call_narrator_agent(data.text)
+            while True:
+                try:
+                    msg = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
+                        timeout=SSE_HEARTBEAT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
 
-    return {"orchestrator_intent": intent, "agent_response": result}
+                if msg is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                if msg.get("type") != "message":
+                    continue
+                yield f"data: {msg['data']}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                await pubsub.unsubscribe()
+                await pubsub.aclose()
+                # Don't close the shared _async_redis here — it's used by other
+                # connections.
+            except Exception as e:  # noqa: BLE001 - cleanup is best-effort
+                logger.warning("SSE pubsub cleanup error for %s: %s", room_id, e)
 
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ========================================================================
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
