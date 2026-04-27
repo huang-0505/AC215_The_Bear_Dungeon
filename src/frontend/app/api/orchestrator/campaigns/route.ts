@@ -2,7 +2,7 @@
 export async function GET() {
   try {
     // In Docker, use internal service name; otherwise use environment variable
-    const orchestratorUrl = 'http://api-gateway:8000'
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://api-gateway:8000'
     const response = await fetch(`${orchestratorUrl}/campaigns`, {
       method: 'GET',
       headers: {

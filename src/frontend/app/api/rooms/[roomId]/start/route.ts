@@ -6,5 +6,5 @@ export async function POST(
   { params }: { params: { roomId: string } },
 ) {
   const body = await request.text()
-  return proxyJson(`/rooms/${params.roomId}/action`, { method: "POST", body }, request)
+  return proxyJson(`/rooms/${params.roomId}/start`, { method: "POST", body }, request)
 }
