@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Claude Code local config (never commit)
+.claude/settings.local.json
+
 # C extensions
 *.so
 
