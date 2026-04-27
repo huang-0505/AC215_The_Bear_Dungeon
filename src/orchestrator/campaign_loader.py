@@ -6,7 +6,6 @@ Provides initial game state setup for various campaigns.
 """
 
 from typing import Dict, List, Optional
-from game_state import GameStateTree, GameStateType, AgentType
 
 
 class CampaignTemplate:
