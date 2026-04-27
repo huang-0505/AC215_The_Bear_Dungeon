@@ -37,7 +37,13 @@ dependencies = [
     # Data processing (needed by backend)
     "pandas==2.2.3",
     "numpy>=2.1.0",
-    
+
+    # Multiplayer / orchestrator deps mirror src/orchestrator/requirements.txt
+    "redis>=5.0.0",
+    "fakeredis>=2.20.0",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+
     # Code quality tools (for CI/CD)
     "black>=24.0.0",
     "flake8>=7.0.0",
